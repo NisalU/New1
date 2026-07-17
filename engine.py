@@ -11,33 +11,39 @@ import config
 import data_feed
 from strategies import (auction, ema_trend, fibonacci, fundamentals, liquidity,
                         orderflow, patterns, smc, support_resistance, trendlines)
+from strategies import vwap, kill_zones, wyckoff
 from strategies.helpers import atr
 
 SIGNALS_FILE = os.path.join(os.path.dirname(__file__), "signals.json")
 
 STRATEGIES = {
-    "ema_trend": ("EMA 7/25/99", lambda c, f: ema_trend.analyze(c)),
-    "support_resistance": ("Support / Resistance", lambda c, f: support_resistance.analyze(c)),
-    "trendlines": ("Trendlines", lambda c, f: trendlines.analyze(c)),
-    "patterns": ("Chart Patterns", lambda c, f: patterns.analyze(c)),
-    "fibonacci": ("Fibonacci", lambda c, f: fibonacci.analyze(c)),
-    "smc": ("Smart Money Concepts", lambda c, f: smc.analyze(c)),
-    "liquidity_sweep": ("Liquidity Sweeps", lambda c, f: liquidity.analyze(c)),
-    "orderflow_cvd": ("Orderflow / CVD", lambda c, f: orderflow.analyze(c)),
-    "auction_market": ("Auction Market", lambda c, f: auction.analyze(c)),
-    "fundamentals": ("Fundamentals", lambda c, f: fundamentals.analyze(c, f)),
+    # --- Original strategies ---
+    "ema_trend":          ("EMA 7/25/99",              lambda c, f: ema_trend.analyze(c)),
+    "support_resistance": ("Support / Resistance",     lambda c, f: support_resistance.analyze(c)),
+    "trendlines":         ("Trendlines",               lambda c, f: trendlines.analyze(c)),
+    "patterns":           ("Chart Patterns",           lambda c, f: patterns.analyze(c)),
+    "fibonacci":          ("Fibonacci",                lambda c, f: fibonacci.analyze(c)),
+    "smc":                ("Smart Money Concepts",     lambda c, f: smc.analyze(c)),
+    "liquidity_sweep":    ("Liquidity / Inducement",   lambda c, f: liquidity.analyze(c)),
+    "orderflow_cvd":      ("Orderflow / Delta",        lambda c, f: orderflow.analyze(c)),
+    "auction_market":     ("Auction Market / VP",      lambda c, f: auction.analyze(c)),
+    "fundamentals":       ("Fundamentals",             lambda c, f: fundamentals.analyze(c, f)),
+    # --- New institutional strategies ---
+    "vwap":               ("VWAP / AVWAP",             lambda c, f: vwap.analyze(c)),
+    "kill_zones":         ("Kill Zones",               lambda c, f: kill_zones.analyze(c)),
+    "wyckoff":            ("Wyckoff Phase",            lambda c, f: wyckoff.analyze(c)),
 }
 
 
 class Engine:
     def __init__(self):
         self._lock = threading.Lock()
-        self._state = {}          # (symbol, interval) -> analysis dict
+        self._state = {}
         self.symbol = config.DEFAULT_SYMBOL
         self.interval = config.DEFAULT_INTERVAL
         self.signals = self._load_signals()
-        self._last_signal_key = {}  # avoid duplicate consecutive signals
-        self._mkt_locks = {}        # "symbol:interval" -> threading.Lock
+        self._last_signal_key = {}
+        self._mkt_locks = {}
         self._mkt_locks_guard = threading.Lock()
 
     def _market_lock(self, mk):
@@ -52,26 +58,25 @@ class Engine:
         try:
             with open(SIGNALS_FILE) as fh:
                 return json.load(fh)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return []
 
     def _save_signals(self):
         try:
             with open(SIGNALS_FILE, "w") as fh:
                 json.dump(self.signals[-config.MAX_SIGNAL_HISTORY:], fh)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     # ---------- analysis ----------
     def analyze(self, symbol, interval):
-        """Thread-safe: concurrent calls for the same market are serialized
-        and bursts collapse onto a just-computed result."""
+        """Thread-safe: concurrent calls for the same market are serialized."""
         mk = f"{symbol}:{interval}"
         with self._market_lock(mk):
             with self._lock:
                 cached = self._state.get(mk)
             if cached and time.time() - cached["updated"] < 2:
-                return cached  # another thread refreshed this market just now
+                return cached
             return self._analyze(symbol, interval, mk)
 
     def _analyze(self, symbol, interval, mk):
@@ -86,11 +91,12 @@ class Engine:
         breakdown = []
         overlays = {}
         composite = 0.0
+
         for key, (label, fn) in STRATEGIES.items():
             weight = config.WEIGHTS.get(key, 0)
             try:
                 res = fn(candles, futures_stats)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 traceback.print_exc()
                 res = {"score": 0, "reasons": ["strategy error"], "overlays": {}}
             contribution = res["score"] * weight
@@ -137,7 +143,6 @@ class Engine:
             "candles": candles,
         }
 
-        # Record signal event on new non-neutral direction for this market
         if direction != "NEUTRAL" and self._last_signal_key.get(mk) != direction:
             top = sorted(breakdown, key=lambda b: -abs(b["contribution"]))[:4]
             with self._lock:
@@ -161,7 +166,6 @@ class Engine:
         mk = f"{symbol}:{interval}"
         with self._lock:
             cached = self._state.get(mk)
-        # Serve cache if fresh enough, else analyze on demand
         if cached and time.time() - cached["updated"] < config.REFRESH_SECONDS * 1.5:
             return cached
         return self.analyze(symbol, interval)
