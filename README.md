@@ -1,13 +1,13 @@
-# AI Trading Signal Bot (Termux + Web Dashboard)
+# AI Trading Signal Bot (linux + Web Dashboard)
 
 A pure-Python crypto trading signal bot that analyzes Binance market data with
-10 strategies and serves a live charting dashboard on your phone's local IP.
+10 strategies and serves a live charting dashboard on local machine local ip
 
 Built on **aiohttp + WebSocket** for realtime updates: live trade ticks move
 the last candle and the price with smooth animation, klines stream in as they
 form, and analysis snapshots / signals push instantly to every connected
 browser. No numpy / pandas — only `aiohttp`, `websockets` and
-`requests`, so it installs cleanly on Termux.
+`requests`, so it installs cleanly on linux
 
 ## Strategies (confluence scored)
 
@@ -28,10 +28,10 @@ Each strategy votes -1..+1 and is weighted (see `config.py`). A LONG/SHORT
 signal fires when the composite score crosses the threshold (default 45/100),
 together with an ATR-based trade plan (entry / stop / TP1 / TP2).
 
-## Install on Termux
+## Install on linux
 
 ```bash
-pkg update && pkg install python git
+apt update && pkg install python git
 git clone <your-repo-url> signal-bot && cd signal-bot
 pip install -r requirements.txt
 python server.py
