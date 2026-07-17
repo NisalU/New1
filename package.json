@@ -1,0 +1,9 @@
+{
+  "name": "signal-bot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": ".venv/bin/python server.py",
+    "start": ".venv/bin/python server.py"
+  }
+}

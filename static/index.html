@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b0f14" />
+  <title>Signal Bot — AI Trading Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="live-dot" aria-hidden="true"></span>
+      <h1>SIGNAL<span>BOT</span></h1>
+      <span class="latency" id="latency" title="WebSocket round-trip latency"></span>
+    </div>
+    <div class="topbar-live">
+      <span class="live-pill" id="tick-rate" title="Live trade rate">— t/m</span>
+      <span class="live-pill clock" id="live-clock"></span>
+    </div>
+    <div class="controls">
+      <label class="sr-only" for="symbol">Symbol</label>
+      <select id="symbol"></select>
+      <label class="sr-only" for="interval">Interval</label>
+      <select id="interval"></select>
+    </div>
+  </header>
+
+  <main class="layout">
+
+    <!-- Verdict banner -->
+    <section class="card verdict" id="verdict-card" aria-live="polite">
+      <div class="verdict-left">
+        <div class="price-row">
+          <span class="big-price" id="price">&mdash;</span>
+          <span class="chg" id="chg"></span>
+        </div>
+        <!-- Buy/sell pressure bar -->
+        <div class="pressure-wrap" title="Buy vs sell volume pressure">
+          <div class="pressure-bar">
+            <div class="pressure-buy" id="pressure-buy" style="width:50%"></div>
+          </div>
+          <span class="pressure-labels">
+            <span class="buy-lbl" id="buy-pct">50%</span>
+            <span class="pressure-mid">pressure</span>
+            <span class="sell-lbl" id="sell-pct">50%</span>
+          </span>
+        </div>
+        <div class="tape" id="tape" aria-hidden="true"></div>
+        <div class="verdict-badge neutral" id="verdict">CONNECTING&hellip;</div>
+      </div>
+      <div class="gauge-wrap">
+        <div class="gauge-labels"><span>SHORT</span><span>NEUTRAL</span><span>LONG</span></div>
+        <div class="gauge"><div class="gauge-needle" id="gauge-needle"></div></div>
+        <div class="gauge-score" id="gauge-score">—</div>
+        <div class="candle-countdown" id="candle-countdown"></div>
+      </div>
+    </section>
+
+    <!-- Active Signal Lock banner -->
+    <div class="signal-lock-banner hidden" id="signal-lock-banner">
+      <span class="signal-lock-icon">🔒</span>
+      <span class="signal-lock-text" id="signal-lock-text">Signal active — AI analysis paused until stop or target</span>
+      <span class="signal-lock-detail" id="signal-lock-detail"></span>
+    </div>
+
+    <!-- Status row: AI Engine + Binance -->
+    <div class="status-row">
+      <section class="card engine-status-card" id="engine-status-card">
+        <div class="es-header">
+          <div class="es-title-row">
+            <span class="es-dot" id="es-dot"></span>
+            <span class="es-title">AI Engine <span id="es-status-label">Offline</span></span>
+          </div>
+          <span class="es-version" id="es-version">v5.0</span>
+        </div>
+
+        <div class="es-model-row" id="es-model-row">
+          <div class="es-provider-badge muted" id="es-provider-badge">—</div>
+          <span class="es-model-name" id="es-model-name" title="">—</span>
+          <span class="es-fallback-badge hidden" id="es-fallback-badge">FALLBACK</span>
+        </div>
+
+        <div class="es-metrics">
+          <div class="es-metric">
+            <span class="es-metric-label">Latency</span>
+            <div class="es-metric-right">
+              <span class="es-metric-value green" id="es-latency">&mdash;</span>
+              <canvas class="latency-spark" id="latency-spark" width="60" height="20" aria-hidden="true"></canvas>
+            </div>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Inference</span>
+            <span class="es-metric-value" id="es-inference">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Total calls</span>
+            <span class="es-metric-value" id="es-total">&mdash;</span>
+          </div>
+          <!-- AI Analysis Countdown -->
+          <div class="es-metric es-metric-countdown">
+            <span class="es-metric-label">Next analysis</span>
+            <div class="es-metric-right">
+              <span class="countdown-pill" id="es-next-analysis">—</span>
+              <div class="countdown-ring-wrap" id="countdown-ring-wrap">
+                <svg class="countdown-ring" viewBox="0 0 36 36" aria-hidden="true">
+                  <circle class="countdown-ring-bg" cx="18" cy="18" r="15.9" />
+                  <circle class="countdown-ring-fill" id="countdown-ring-fill"
+                          cx="18" cy="18" r="15.9"
+                          stroke-dasharray="100 100"
+                          stroke-dashoffset="0" />
+                </svg>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="es-waveform" aria-hidden="true">
+          <div class="wave-bars" id="wave-bars"></div>
+        </div>
+      </section>
+
+      <section class="card binance-status-card" id="binance-status-card">
+        <div class="es-header">
+          <div class="es-title-row">
+            <span class="binance-icon">⬡</span>
+            <span class="es-title">Binance Exchange</span>
+          </div>
+          <span class="es-version" id="bnb-mode">Public</span>
+        </div>
+        <div class="es-metrics">
+          <div class="es-metric">
+            <span class="es-metric-label">API Key</span>
+            <span class="es-metric-value" id="bnb-key">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">API Secret</span>
+            <span class="es-metric-value" id="bnb-secret">&mdash;</span>
+          </div>
+          <div class="es-metric">
+            <span class="es-metric-label">Orders</span>
+            <span class="es-metric-value" id="bnb-orders">&mdash;</span>
+          </div>
+        </div>
+        <div class="bnb-hint" id="bnb-hint">
+          Set BINANCE_API_KEY &amp; BINANCE_API_SECRET in .env to enable authenticated trading.
+        </div>
+      </section>
+    </div>
+
+    <!-- API Pipeline card — 3 stages (Critic removed) -->
+    <section class="card pipeline-card" id="pipeline-card">
+      <div class="card-head">
+        <h2>AI API Pipeline</h2>
+        <div class="pipeline-meta">
+          <span class="pipe-last-call" id="pipe-last-call">Waiting for first call&hellip;</span>
+          <span class="pipe-duration" id="pipe-duration"></span>
+        </div>
+      </div>
+
+      <!-- 3-stage pipeline: Market Data → AI Analyst → Signal Out -->
+      <div class="pipeline" id="pipeline" aria-label="AI API pipeline stages">
+
+        <div class="pipe-stage" id="pipe-stage-0" data-stage="0">
+          <div class="pipe-node">
+            <div class="pipe-node-ring"></div>
+            <div class="pipe-node-dot"></div>
+          </div>
+          <div class="pipe-label">Market Data</div>
+          <div class="pipe-sub" id="pipe-sub-0">idle</div>
+        </div>
+
+        <div class="pipe-connector" id="pipe-conn-0">
+          <div class="pipe-line"></div>
+          <div class="pipe-particle" id="pipe-particle-0"></div>
+        </div>
+
+        <div class="pipe-stage" id="pipe-stage-1" data-stage="1">
+          <div class="pipe-node">
+            <div class="pipe-node-ring"></div>
+            <div class="pipe-node-dot"></div>
+          </div>
+          <div class="pipe-label">AI Analyst</div>
+          <div class="pipe-sub" id="pipe-sub-1">idle</div>
+        </div>
+
+        <div class="pipe-connector" id="pipe-conn-1">
+          <div class="pipe-line"></div>
+          <div class="pipe-particle" id="pipe-particle-1"></div>
+        </div>
+
+        <div class="pipe-stage" id="pipe-stage-2" data-stage="2">
+          <div class="pipe-node">
+            <div class="pipe-node-ring"></div>
+            <div class="pipe-node-dot"></div>
+          </div>
+          <div class="pipe-label">Signal Out</div>
+          <div class="pipe-sub" id="pipe-sub-2">—</div>
+        </div>
+
+      </div>
+
+      <!-- Live AI analysis detail panel -->
+      <div class="pipe-detail-panel" id="pipe-detail-panel">
+        <div class="pipe-detail-block" id="pipe-detail-analyst">
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Model</span>
+            <span class="pipe-detail-val" id="pd-model">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Signal</span>
+            <span class="pipe-detail-val" id="pd-signal">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Confidence</span>
+            <span class="pipe-detail-val" id="pd-confidence">—</span>
+          </div>
+          <div class="pipe-detail-row">
+            <span class="pipe-detail-key">Setup</span>
+            <span class="pipe-detail-val" id="pd-setup">—</span>
+          </div>
+          <div class="pipe-detail-row pipe-detail-reasoning-row">
+            <span class="pipe-detail-key">Reasoning</span>
+            <span class="pipe-detail-val pipe-detail-reasoning" id="pd-reasoning">—</span>
+          </div>
+        </div>
+
+        <!-- Signal out detail -->
+        <div class="pipe-detail-block pipe-detail-signal-out" id="pipe-detail-signal-out">
+          <div class="pipe-signal-out-verdict" id="pd-signal-out-verdict">
+            <span class="pipe-signal-out-icon" id="pd-signal-out-icon">◎</span>
+            <span class="pipe-signal-out-label" id="pd-signal-out-label">Waiting for signal…</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-entry-row" style="display:none">
+            <span class="pipe-detail-key">Entry</span>
+            <span class="pipe-detail-val" id="pd-entry">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-stop-row" style="display:none">
+            <span class="pipe-detail-key">Stop</span>
+            <span class="pipe-detail-val" id="pd-stop">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-tp-row" style="display:none">
+            <span class="pipe-detail-key">TP 1 / 2</span>
+            <span class="pipe-detail-val" id="pd-tp">—</span>
+          </div>
+          <div class="pipe-detail-row" id="pd-rr-row" style="display:none">
+            <span class="pipe-detail-key">R:R</span>
+            <span class="pipe-detail-val" id="pd-rr">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live call log -->
+      <div class="pipe-log" id="pipe-log" aria-live="polite">
+        <div class="pipe-log-empty">No calls yet &mdash; log appears when the AI pipeline runs&hellip;</div>
+      </div>
+
+      <!-- Live pipeline events -->
+      <div class="pipe-events-panel">
+        <div class="pipe-events-header">
+          <span class="pipe-events-title">Live Processing Events</span>
+          <span class="pipe-events-count" id="pipe-events-count"></span>
+        </div>
+        <div class="pipe-events-list" id="pipe-events-list">
+          <div class="pev-empty">Events appear here as the AI pipeline runs&hellip;</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Trade plan -->
+    <section class="card plan hidden" id="plan-card">
+      <h2>Trade Plan (ATR based)</h2>
+      <div class="plan-grid">
+        <div><span class="k">Entry</span><span class="v" id="plan-entry">&mdash;</span></div>
+        <div><span class="k">Stop</span><span class="v red" id="plan-stop">&mdash;</span></div>
+        <div><span class="k">TP 1</span><span class="v green" id="plan-tp1">&mdash;</span></div>
+        <div><span class="k">TP 2</span><span class="v green" id="plan-tp2">&mdash;</span></div>
+      </div>
+    </section>
+
+    <!-- Live price chart -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Live Price · EMA 7/25/99 · S/R · Fib · SMC</h2>
+        <div class="legend">
+          <span class="lg lg-ema7">EMA7</span>
+          <span class="lg lg-ema25">EMA25</span>
+          <span class="lg lg-ema99">EMA99</span>
+        </div>
+      </div>
+      <div id="chart" class="chart-main" role="img" aria-label="Live candlestick price chart with indicators"></div>
+    </section>
+
+    <!-- CVD chart -->
+    <section class="card">
+      <div class="card-head"><h2>Cumulative Volume Delta (CVD)</h2></div>
+      <div id="cvd-chart" class="chart-cvd" role="img" aria-label="Cumulative volume delta chart"></div>
+    </section>
+
+    <!-- AI Predict Limit Signal Charts (15m + 1h) -->
+    <section class="card" id="ai-chart-card">
+      <div class="card-head">
+        <h2>AI Limit Signal Preview</h2>
+        <span class="ai-signal-badge hidden" id="ai-chart-badge"></span>
+      </div>
+      <div class="ai-chart-row" id="ai-chart-row" style="display:none">
+        <div class="ai-chart-col" id="ai-chart-15m-col">
+          <div class="ai-chart-label">15m &middot; Entry Zones</div>
+          <div id="ai-chart-15m" class="ai-chart-canvas"></div>
+        </div>
+        <div class="ai-chart-col" id="ai-chart-1h-col">
+          <div class="ai-chart-label">1h &middot; Structure</div>
+          <div id="ai-chart-1h" class="ai-chart-canvas"></div>
+        </div>
+      </div>
+      <div class="ai-chart-empty" id="ai-chart-empty">
+        Waiting for AI signal &mdash; charts appear when a LONG or SHORT is called&hellip;
+      </div>
+    </section>
+
+    <!-- Confluence breakdown -->
+    <section class="card">
+      <div class="card-head"><h2>Confluence Breakdown</h2></div>
+      <div id="breakdown" class="breakdown"></div>
+    </section>
+
+    <!-- Fundamentals -->
+    <section class="card hidden" id="fund-card">
+      <div class="card-head"><h2>Fundamentals</h2></div>
+      <div class="plan-grid" id="fundamentals">
+        <div><span class="k">Funding</span><span class="v" id="f-funding">&mdash;</span></div>
+        <div><span class="k">OI &Delta; 24h</span><span class="v" id="f-oi">&mdash;</span></div>
+        <div><span class="k">Long/Short</span><span class="v" id="f-ls">&mdash;</span></div>
+        <div><span class="k">Mark</span><span class="v" id="f-mark">&mdash;</span></div>
+      </div>
+    </section>
+
+    <!-- Recent AI Signals table -->
+    <section class="card" id="ai-signals-table-card">
+      <div class="card-head">
+        <h2>Recent AI Signals</h2>
+        <div class="table-controls">
+          <span class="sig-count" id="sig-count"></span>
+          <button class="sig-filter-btn" id="sig-filter-btn" title="Toggle between all symbols and current symbol">All symbols</button>
+        </div>
+      </div>
+      <div class="ai-sig-table-wrap">
+        <table class="ai-sig-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Setup</th>
+              <th>Direction</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="ai-sig-tbody">
+            <tr class="ai-sig-empty">
+              <td colspan="5">No AI signals yet &mdash; watching for high-quality setups&hellip;</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Pending Limit Orders -->
+    <section class="card" id="pending-limits-card">
+      <div class="card-head">
+        <h2>Pending Limit Orders</h2>
+        <span class="sig-count" id="pending-limits-count"></span>
+      </div>
+      <p class="empty" id="pending-limits-empty">No pending limit orders &mdash; the AI will place one when a retest level is identified.</p>
+      <div id="pending-limits-list"></div>
+    </section>
+
+    <!-- AI trade calls feed -->
+    <section class="card">
+      <div class="card-head"><h2>AI Trade Calls</h2></div>
+      <div id="signals" class="signals">
+        <p class="empty">No trade call yet &mdash; the AI analyst is watching for an A+ setup.</p>
+      </div>
+    </section>
+
+    <footer class="disclaimer">
+      Educational tool &mdash; not financial advice. Signals are algorithmic confluence
+      scores, not guarantees. Trade at your own risk.
+    </footer>
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
