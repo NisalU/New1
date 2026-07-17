@@ -261,8 +261,10 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                 ivl = msg.get("interval", config.DEFAULT_INTERVAL)
                 if sym in config.SYMBOLS and ivl in config.INTERVALS:
                     old_sym = client.symbol
-                    client.symbol   = sym
-                    client.interval = ivl
+                    # retarget() updates client.symbol/interval AND fires
+                    # _resub so the upstream loop resubscribes to the new
+                    # symbol's aggTrade + kline_ Binance streams immediately.
+                    manager.retarget(client, sym, ivl)
                     asyncio.create_task(push_snapshot(sym, ivl))
                     # Push cached AI immediately so dashboard updates without wait
                     if ai_analyst.enabled:
