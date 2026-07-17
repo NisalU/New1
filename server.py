@@ -24,6 +24,12 @@ ai_analyst = None  # type: ignore[assignment]
 engine     = None  # type: ignore[assignment]
 manager    = None  # type: ignore[assignment]
 
+# ── Priority queue for immediate AI analysis on symbol switch ────────────────
+# Symbols added here jump to the front of _ai_loop's queue.
+# _priority_event wakes the sleeping loop instantly (no 60 s wait).
+_priority_symbols: set = set()
+_priority_event: "asyncio.Event | None" = None
+
 
 # ---------------------------------------------------------------------------
 # Terminal key prompting
@@ -263,6 +269,13 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                         cached_ai = ai_analyst.get_cached(sym)
                         if cached_ai:
                             client.send({"type": "ai", "data": cached_ai})
+                        else:
+                            # No cached result — queue for immediate analysis and
+                            # tell the client to show the "analyzing" animation now.
+                            _priority_symbols.add(sym)
+                            if _priority_event:
+                                _priority_event.set()
+                            client.send({"type": "ai_analyzing", "symbol": sym})
                         _push_countdown(client, sym)
                         client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
                         client.send({"type": "ai_signals_table", "data": ai_analyst.get_recent_signals()})
@@ -336,6 +349,8 @@ async def _ai_loop() -> None:
     - Skips analysis when an active signal is live (price hasn't hit stop/target).
     - Broadcasts countdown so the dashboard can show a live timer.
     - Uses exponential backoff when all models are rate-limited.
+    - Priority queue: symbols added to _priority_symbols jump to the front
+      and wake the loop immediately via _priority_event (no 60-s wait).
     """
     _symbol_queue: list[str] = []
     _consecutive_failures = 0
@@ -348,6 +363,13 @@ async def _ai_loop() -> None:
             for s in active:
                 if s not in _symbol_queue:
                     _symbol_queue.append(s)
+
+            # Promote any priority symbols (new symbol subscriptions) to front
+            for ps in list(_priority_symbols & set(active)):
+                _priority_symbols.discard(ps)
+                if ps in _symbol_queue:
+                    _symbol_queue.remove(ps)
+                _symbol_queue.insert(0, ps)
 
             symbol = _symbol_queue.pop(0) if _symbol_queue else config.DEFAULT_SYMBOL
             if symbol not in _symbol_queue:
@@ -413,7 +435,19 @@ async def _ai_loop() -> None:
         except Exception:
             traceback.print_exc()
 
-        await asyncio.sleep(config.AI_REFRESH_SECONDS)
+        # Interruptible sleep: wakes immediately when a priority symbol arrives
+        # (e.g. user switched to a symbol with no cached result).
+        if _priority_event:
+            _priority_event.clear()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(_priority_event.wait()),
+                    timeout=float(config.AI_REFRESH_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(config.AI_REFRESH_SECONDS)
 
 
 import time as _time_mod  # noqa: E402 (used in _ai_loop)
@@ -424,6 +458,8 @@ import time as _time_mod  # noqa: E402 (used in _ai_loop)
 # ---------------------------------------------------------------------------
 
 async def on_startup(app: web.Application) -> None:
+    global _priority_event
+    _priority_event = asyncio.Event()
     manager.start()
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())

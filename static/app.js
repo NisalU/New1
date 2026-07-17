@@ -921,6 +921,37 @@
     }, 560));
   }
 
+  /* Called immediately when the server confirms it is analysing a new symbol.
+     Starts the pipeline animation so the user sees activity right away instead
+     of staring at a frozen "Waiting for first call…" panel. */
+  function showAIAnalyzing(sym) {
+    if (_pipelineActive) return;   // already animating — don't interrupt
+    _pipelineActive = true;
+    _pipeCallStart  = Date.now();
+    _clearPipelineTimers();
+
+    _setPipeStage(0, "done", "fetched");
+    _flowConnector(0, "", 0.5);
+    _pipelineTimers.push(setTimeout(function () {
+      _doneConnector(0, "done");
+      _setPipeStage(1, "active", "analyzing " + sym + "…");
+      // Keep stage 1 pulsing with a thinking-dots sub-label update loop
+      var dots = 0;
+      var dotTimer = setInterval(function () {
+        if (!_pipelineActive) { clearInterval(dotTimer); return; }
+        dots = (dots + 1) % 4;
+        var d = ["", ".", "..", "…"][dots];
+        _setPipeStage(1, "active", "analyzing " + sym + d);
+      }, 600);
+      _pipelineTimers.push(dotTimer);  // store so _clearPipelineTimers can stop it
+    }, 500));
+
+    var lastCallEl = document.getElementById("pipe-last-call");
+    var durEl      = document.getElementById("pipe-duration");
+    if (lastCallEl) lastCallEl.textContent = "Analysing " + sym + " now…";
+    if (durEl)      durEl.textContent      = "";
+  }
+
   function completePipeline(ai) {
     _pipelineActive = false;
     _clearPipelineTimers();
@@ -1502,6 +1533,11 @@
         case "ai":
           if (m.data.symbol === symbolEl.value) onAI(m.data);
           break;
+        case "ai_analyzing":
+          // Server is actively running analysis for this symbol right now —
+          // start the pipeline animation immediately (don't wait 60 s).
+          if (m.symbol === symbolEl.value) showAIAnalyzing(m.symbol);
+          break;
         case "ai_chart":
           renderAIChart(m);
           break;
@@ -1576,11 +1612,36 @@
     Object.values(_aiCharts).forEach(function (ctx) { ctx.chart.remove(); });
     _aiCharts = {};
 
-    // Reset pipeline detail
-    var pdSignal = document.getElementById("pd-signal");
-    if (pdSignal) pdSignal.textContent = "—";
-    var pdReas = document.getElementById("pd-reasoning");
-    if (pdReas) pdReas.textContent = "—";
+    // ── Full pipeline reset ──────────────────────────────────────────────
+    // Cancel any in-flight animation so old state doesn't bleed into the
+    // new symbol's view.
+    _pipelineActive = false;
+    _clearPipelineTimers();
+    _resetPipeline();
+
+    // Clear the detail panel completely
+    var fields = ["pd-model", "pd-signal", "pd-confidence", "pd-setup", "pd-reasoning"];
+    fields.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) { el.textContent = "—"; el.className = "pipe-detail-val"; }
+    });
+    // Reset signal-out to neutral waiting state
+    var verdictEl = document.getElementById("pd-signal-out-verdict");
+    var iconEl    = document.getElementById("pd-signal-out-icon");
+    var labelEl   = document.getElementById("pd-signal-out-label");
+    if (verdictEl) verdictEl.className = "pipe-signal-out-verdict sig-wait";
+    if (iconEl)    iconEl.textContent  = "◎";
+    if (labelEl)   labelEl.textContent = "Waiting for signal…";
+    ["pd-entry-row","pd-stop-row","pd-tp-row","pd-rr-row"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    });
+    // Reset header meta
+    var lastCallEl = document.getElementById("pipe-last-call");
+    var durEl      = document.getElementById("pipe-duration");
+    if (lastCallEl) lastCallEl.textContent = "Switching to " + sym + "…";
+    if (durEl)      durEl.textContent      = "";
+    // ── End pipeline reset ───────────────────────────────────────────────
 
     showLoading(sym, intv);
     updateFilterLabel();
