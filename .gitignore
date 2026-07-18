@@ -6,7 +6,9 @@ __v0_jsx-dev-runtime.ts
 .v0-trash/
 .vercel/
 
-# Environment variables
+# Environment variables — never commit real keys
+.env
+.env.local
 .env*.local
 
 # Common ignores
@@ -18,5 +20,7 @@ node_modules
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime state — regenerated on every run
 signals.json
 signal_history.db

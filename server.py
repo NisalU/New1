@@ -4,11 +4,17 @@ Run on any local Linux/Mac machine:
     pip install -r requirements.txt
     python server.py
 Then open http://<local-ip>:8000 from any device on the same network.
+
+Keys can be supplied three ways (highest priority first):
+  1. Environment variables: GROQ_API_KEY, BINANCE_API_KEY, BINANCE_API_SECRET
+  2. A .env file in the project directory
+  3. Interactive prompt at startup (only when running in a TTY)
 """
 import asyncio
 import contextlib
 import getpass
 import json
+import logging
 import os
 import socket
 import sys
@@ -16,7 +22,23 @@ import traceback
 from pathlib import Path
 import time
 
+# ── .env support ──────────────────────────────────────────────────────────────
+# Load before anything else so env vars are available to all modules.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv is optional; fall back to plain env vars
+
 from aiohttp import WSMsgType, web
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("server")
 
 BASE_DIR = Path(__file__).parent
 
@@ -37,10 +59,29 @@ _priority_event: "asyncio.Event | None" = None
 # ---------------------------------------------------------------------------
 
 def _prompt_for_keys() -> None:
+    """Interactively prompt for API keys that are not already in the environment.
+
+    Skipped entirely when:
+      - All required keys are already set (via env or .env file)
+      - stdin is not a TTY (Docker, CI, piped input)
+    """
+    # Skip if Groq key is already available
+    if os.environ.get("GROQ_API_KEY"):
+        return
+
+    # Skip if not running interactively
+    if not sys.stdin.isatty():
+        log.warning(
+            "No GROQ_API_KEY in environment and stdin is not a TTY — "
+            "AI analyst will be disabled. Set GROQ_API_KEY in your .env file."
+        )
+        return
+
     print()
     print("=" * 56)
     print("  AI Trading Signal Bot — API Key Setup")
     print("  Input is hidden; keys will not be displayed.")
+    print("  Tip: create a .env file to skip this prompt.")
     print("=" * 56)
     print()
 
@@ -56,18 +97,19 @@ def _prompt_for_keys() -> None:
 
     print()
 
-    print("  Binance API credentials (optional — for authenticated endpoints).")
-    binance_key = getpass.getpass("  Binance API key (Enter to skip): ").strip()
-    if binance_key:
-        os.environ["BINANCE_API_KEY"] = binance_key
-        binance_secret = getpass.getpass("  Binance API secret: ").strip()
-        if binance_secret:
-            os.environ["BINANCE_API_SECRET"] = binance_secret
-            print("  [ok] Binance credentials set.")
+    if not os.environ.get("BINANCE_API_KEY"):
+        print("  Binance API credentials (optional — for authenticated endpoints).")
+        binance_key = getpass.getpass("  Binance API key (Enter to skip): ").strip()
+        if binance_key:
+            os.environ["BINANCE_API_KEY"] = binance_key
+            binance_secret = getpass.getpass("  Binance API secret: ").strip()
+            if binance_secret:
+                os.environ["BINANCE_API_SECRET"] = binance_secret
+                print("  [ok] Binance credentials set.")
+            else:
+                print("  [skip] No secret — skipping Binance auth.")
         else:
-            print("  [skip] No secret — skipping Binance auth.")
-    else:
-        print("  [skip] No Binance key — public market data only.")
+            print("  [skip] No Binance key — public market data only.")
 
     print()
     print("=" * 56)
@@ -442,9 +484,9 @@ async def _ai_loop() -> None:
             if result.get("error", "").startswith("RATE_LIMIT:"):
                 _consecutive_failures += 1
                 backoff = _BACKOFF[min(_consecutive_failures - 1, len(_BACKOFF) - 1)]
-                print(
-                    f"[ai] All models rate-limited (failure #{_consecutive_failures}). "
-                    f"Backing off {backoff // 60} min."
+                log.warning(
+                    "[ai] All models rate-limited (failure #%d). Backing off %d min.",
+                    _consecutive_failures, backoff // 60,
                 )
                 # Update next-ts for extended backoff
                 backoff_next = int(time.time() + backoff)
@@ -487,19 +529,18 @@ async def _ai_loop() -> None:
 
         # Interruptible sleep: wakes immediately when a priority symbol arrives
         # (e.g. user switched to a symbol with no cached result).
+        # NOTE: do NOT wrap with asyncio.shield — that leaks coroutines on timeout.
         if _priority_event:
             _priority_event.clear()
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(_priority_event.wait()),
+                    _priority_event.wait(),
                     timeout=float(config.AI_REFRESH_SECONDS),
                 )
             except asyncio.TimeoutError:
                 pass
         else:
             await asyncio.sleep(config.AI_REFRESH_SECONDS)
-
-
 
 
 def _broadcast_all(msg: dict) -> None:
@@ -535,13 +576,13 @@ async def on_startup(app: web.Application) -> None:
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())
         app["status_task"] = asyncio.create_task(_status_loop())
-        print("[ai] Groq AI analyst enabled — 1-min refresh cycle active")
+        log.info("[ai] Groq AI analyst enabled — 1-min refresh cycle active")
     else:
-        print("[ai] No Groq key — AI analysis disabled")
+        log.info("[ai] No Groq key — AI analysis disabled")
     if config.BINANCE_API_KEY:
-        print("[binance] API key configured")
+        log.info("[binance] API key configured")
     else:
-        print("[binance] No API key — public endpoints only")
+        log.info("[binance] No API key — public endpoints only")
 
 
 async def on_cleanup(app: web.Application) -> None:

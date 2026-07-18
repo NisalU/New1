@@ -42,14 +42,23 @@ class DataError(Exception):
 
 
 def _session():
-    s = getattr(_tls, "session", None)
-    if s is None:
+    """Return this thread's requests.Session, creating or refreshing it when
+    the configured Binance API key has changed since the session was built."""
+    current_key = config.BINANCE_API_KEY
+
+    s          = getattr(_tls, "session",     None)
+    session_key = getattr(_tls, "session_key", None)
+
+    # Recreate session if missing or if the API key has changed
+    if s is None or session_key != current_key:
         s = requests.Session()
         headers = {"User-Agent": "signal-bot/1.0"}
-        if config.BINANCE_API_KEY:
-            headers["X-MBX-APIKEY"] = config.BINANCE_API_KEY
+        if current_key:
+            headers["X-MBX-APIKEY"] = current_key
         s.headers.update(headers)
-        _tls.session = s
+        _tls.session     = s
+        _tls.session_key = current_key
+
     return s
 
 
@@ -198,8 +207,8 @@ def get_account_info():
     """Fetch spot account balances (requires BINANCE_API_KEY + SECRET).
 
     Returns a dict with non-zero balances:
-        { "BTC": {"free": 0.001, "locked": 0.0}, ... }
-    Raises DataError if credentials are not configured or the request fails.
+        {"BTC": {"free": 0.001, "locked": 0.0}, ...}
+    Raises DataError on missing credentials or API failure.
     """
     global _spot_base
     if not config.BINANCE_API_KEY:
@@ -208,19 +217,21 @@ def get_account_info():
         config.SPOT_ENDPOINTS, _spot_base,
         "/api/v3/account", {}, signed=True,
     )
-    balances = {
-        b["asset"]: {"free": float(b["free"]), "locked": float(b["locked"])}
-        for b in data.get("balances", [])
-        if float(b["free"]) > 0 or float(b["locked"]) > 0
-    }
+    balances = {}
+    for b in data.get("balances", []):
+        free = float(b.get("free", 0))
+        locked = float(b.get("locked", 0))
+        if free > 0 or locked > 0:
+            balances[b["asset"]] = {"free": free, "locked": locked}
     return balances
 
 
 def get_open_orders(symbol=None):
-    """Fetch open orders (requires BINANCE_API_KEY + SECRET).
+    """Fetch open spot orders.
 
-    If symbol is None, returns all open orders.
-    Returns a list of order dicts from the Binance API.
+    symbol: if given, fetch orders for that symbol only; otherwise all.
+    Returns a list of Binance order dicts.
+    Raises DataError on missing credentials or API failure.
     """
     global _spot_base
     if not config.BINANCE_API_KEY:
@@ -232,44 +243,32 @@ def get_open_orders(symbol=None):
         config.SPOT_ENDPOINTS, _spot_base,
         "/api/v3/openOrders", params, signed=True,
     )
-    return data
+    return data if isinstance(data, list) else []
 
 
 def get_all_futures_tickers():
-    """Return list of all Binance USDT-futures 24h ticker dicts (cached 60 s).
-
-    Each dict has: symbol, lastPrice, quoteVolume, priceChangePercent, etc.
-    Used by the coin scanner to find liquid candidates without iterating every symbol.
-    """
-    global _fut_base, _fut_disabled_until
+    """Return all 24h futures tickers (cached 60s). Used by the scanner."""
+    global _fut_base, _fut_disabled_until, _all_fut_tickers_cache
     now = time.time()
-    with _cache_lock:
-        if _all_fut_tickers_cache[0] > now:
-            return list(_all_fut_tickers_cache[1])
+    if _all_fut_tickers_cache[0] > now:
+        return _all_fut_tickers_cache[1]
     if now < _fut_disabled_until:
         return []
     try:
-        data, base = _get(
+        data, _fut_base = _get(
             config.FUTURES_ENDPOINTS, _fut_base,
             "/fapi/v1/ticker/24hr", {},
         )
-        _fut_base = base
         result = data if isinstance(data, list) else []
-        with _cache_lock:
-            _all_fut_tickers_cache[0] = now + ALL_FUT_TICKERS_TTL
-            _all_fut_tickers_cache[1] = result
-        return list(result)
+        _all_fut_tickers_cache = [now + ALL_FUT_TICKERS_TTL, result]
+        return result
     except DataError:
         _fut_disabled_until = now + 600
         return []
 
 
 def get_futures_klines(symbol, interval, limit=50):
-    """Return raw Binance futures klines as list-of-lists (newest last).
-
-    Each row: [openTime, open, high, low, close, volume, closeTime, quoteVol, ...]
-    Used by the scanner for ATR(14) and trend-penalty calculations.
-    """
+    """Return raw Binance futures kline list for the scanner's ATR calculation."""
     global _fut_base, _fut_disabled_until
     now = time.time()
     if now < _fut_disabled_until:

@@ -2,3 +2,4 @@ aiohttp
 aiodns
 websockets
 requests
+python-dotenv

@@ -36,13 +36,16 @@ log = logging.getLogger("ai_analyst")
 # ---------------------------------------------------------------------------
 GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+# Valid Groq model identifiers (checked against Groq's model list).
+# The "openai/gpt-oss-*" names are OpenRouter IDs and are rejected by the
+# Groq API with HTTP 404 — they were removed here to stop wasting retries.
 GROQ_MODELS = [
     m for m in [
-        os.environ.get("GROQ_MODEL", ""),
-        "openai/gpt-oss-120b",
+        os.environ.get("GROQ_MODEL", ""),   # override via env
         "llama-3.3-70b-versatile",
-        "openai/gpt-oss-20b",
+        "llama-3.1-70b-versatile",
         "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
     ] if m
 ]
 
@@ -374,6 +377,15 @@ def _fmt_setup_type(raw):
 
 
 def _repair_truncated_json(text):
+    """Best-effort repair of a truncated JSON object.
+
+    Fixes two common LLM truncation patterns:
+      1. String left open (missing closing quote)
+      2. Brackets/braces left open (missing closing tokens)
+
+    The stack now tracks the *type* of each opener so mismatched brackets
+    are closed correctly, e.g. {"a": [1, 2 → {"a": [1, 2]} not {"a": [1, 2}.
+    """
     if not text:
         return None
     start = text.find("{")
@@ -382,7 +394,12 @@ def _repair_truncated_json(text):
     s = text[start:]
     in_string = False
     escape = False
-    stack = []
+    stack: list[str] = []   # stores opening chars: '{' or '['
+
+    _OPENERS = frozenset("{[")
+    _CLOSERS = {"}": "{", "]": "["}
+    _CLOSE_FOR = {"{": "}", "[": "]"}
+
     for ch in s:
         if in_string:
             if escape:
@@ -394,19 +411,21 @@ def _repair_truncated_json(text):
             continue
         if ch == '"':
             in_string = True
-        elif ch in "{[":
+        elif ch in _OPENERS:
             stack.append(ch)
-        elif ch in "}]":
-            if stack:
+        elif ch in _CLOSERS:
+            # Only pop when the closing bracket matches the most recent opener
+            if stack and stack[-1] == _CLOSERS[ch]:
                 stack.pop()
+
     if in_string:
         s += '"'
     s = s.rstrip().rstrip(",")
     if s.endswith(":"):
         s += "null"
-    closers = {"{": "}", "[": "]"}
+    # Close all unclosed brackets in reverse order
     while stack:
-        s += closers[stack.pop()]
+        s += _CLOSE_FOR[stack.pop()]
     return s
 
 
@@ -1067,7 +1086,29 @@ class AIAnalyst:
             grade=final_quality["grade"] if final_quality else None,
         )
 
-        # ── Stage 5: Signal out (no critic) ──────────────────────────────
+        # ── Stage 5: Risk gate — reject low-quality signals ───────────────
+        # Signals that failed structural quality checks are downgraded to WAIT
+        # here so they never reach the signal-memory write or active-signal lock.
+        if result["signal"] in ("LONG", "SHORT") and final_quality:
+            if final_quality["grade"] == "Reject":
+                gate_reason = (
+                    f"Trade quality Reject (score {final_quality['score']}/12): "
+                    f"loc={final_quality['location_quality']}, "
+                    f"struct={final_quality['structure_quality']}, "
+                    f"liq={final_quality['liquidity_quality']}, "
+                    f"of={final_quality['orderflow_quality']}"
+                )
+                log.info("[risk-gate] %s %s gated — %s", symbol, result["signal"], gate_reason)
+                self._record_evt(
+                    run_id=run_id, stage="risk_gate", symbol=symbol,
+                    original_signal=result["signal"], gate_reason=gate_reason,
+                )
+                result["signal"]     = "WAIT"
+                result["direction"]  = None
+                result["gated"]      = True
+                result["gate_reason"] = gate_reason
+
+        # ── Stage 6: Signal out ───────────────────────────────────────────
         self._record_evt(
             run_id=run_id, stage="signal_out", symbol=symbol,
             signal=result["signal"], confidence=result["confidence"],
@@ -1077,7 +1118,7 @@ class AIAnalyst:
             gate_reason=result.get("gate_reason"),
         )
 
-        # ── Stage 6: Signal memory write + active-signal lock ─────────────
+        # ── Stage 7: Signal memory write + active-signal lock ─────────────
         if result["signal"] in ("LONG", "SHORT"):
             signal_memory.record({
                 "symbol":           symbol,
