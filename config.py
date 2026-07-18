@@ -86,9 +86,10 @@ AI_MAX_TOKENS_RETRY = 3500
 AI_JSON_FAIL_COOLDOWN = 30
 
 # Prompt sizing
-AI_PROMPT_CANDLES = 8
-AI_PROMPT_CVD_POINTS = 15
-AI_PROMPT_MEMORY_ROWS = 3
+AI_PROMPT_CANDLES     = 50   # 1H candles sent to AI  (was 8  — ~50h of price history)
+AI_PROMPT_HTF_CANDLES = 10   # 4H candles sent to AI  (new   — ~40h of HTF structure)
+AI_PROMPT_CVD_POINTS  = 30   # CVD data points        (was 15 — longer delta trend)
+AI_PROMPT_MEMORY_ROWS = 5    # past similar setups    (was 3)
 
 # ---- Limit signals ----
 LIMIT_SIGNALS_ENABLED = True

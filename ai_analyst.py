@@ -46,9 +46,10 @@ GROQ_MODELS = [
     ] if m
 ]
 
-PROMPT_CANDLE_COUNT = getattr(config, "AI_PROMPT_CANDLES", 6)
-PROMPT_CVD_POINTS   = getattr(config, "AI_PROMPT_CVD_POINTS", 12)
-PROMPT_MEMORY_ROWS  = getattr(config, "AI_PROMPT_MEMORY_ROWS", 3)
+PROMPT_CANDLE_COUNT  = getattr(config, "AI_PROMPT_CANDLES",     50)
+PROMPT_HTF_CANDLES   = getattr(config, "AI_PROMPT_HTF_CANDLES", 10)
+PROMPT_CVD_POINTS    = getattr(config, "AI_PROMPT_CVD_POINTS",  30)
+PROMPT_MEMORY_ROWS   = getattr(config, "AI_PROMPT_MEMORY_ROWS",  5)
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -192,15 +193,47 @@ def _htf_summary(symbol):
         return None
     ov = htf.get("overlays", {})
     structure = ov.get("structure") or {}
-    top_reasons = sorted(htf["breakdown"], key=lambda b: -abs(b["contribution"]))[:3]
+    top_reasons = sorted(htf["breakdown"], key=lambda b: -abs(b["contribution"]))[:5]
+
+    # Last N 4H candles — gives AI direct HTF price structure to read
+    htf_candles = htf.get("candles") or []
+    htf_recent = [
+        {
+            "t": c["time"], "o": _fnum(c["open"]), "h": _fnum(c["high"]),
+            "l": _fnum(c["low"]), "c": _fnum(c["close"]),
+            "vol": _fnum(c["volume"], 2), "delta": _fnum(c["delta"], 2),
+        }
+        for c in htf_candles[-PROMPT_HTF_CANDLES:]
+    ]
+
+    # HTF key levels (OBs, FVGs, S/R)
+    htf_levels = {}
+    if ov.get("order_blocks"):
+        htf_levels["order_blocks"] = [
+            {"type": ob["type"], "top": _fnum(ob["top"]), "bottom": _fnum(ob["bottom"])}
+            for ob in ov["order_blocks"][:4]
+        ]
+    fvg_list = ov.get("fvg") or ov.get("fvgs") or []
+    if fvg_list:
+        htf_levels["fvg"] = [
+            {"type": f["type"], "top": _fnum(f["top"]), "bottom": _fnum(f["bottom"])}
+            for f in fvg_list[:4]
+        ]
+    if ov.get("support"):
+        htf_levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:3]]
+    if ov.get("resistance"):
+        htf_levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:3]]
+
     return {
-        "interval": config.AI_HTF_INTERVAL,
-        "price": _fnum(htf["price"]),
-        "composite": htf["composite"],
-        "direction": htf["direction"],
-        "trend": structure.get("trend"),
+        "interval":        config.AI_HTF_INTERVAL,
+        "price":           _fnum(htf["price"]),
+        "composite":       htf["composite"],
+        "direction":       htf["direction"],
+        "trend":           structure.get("trend"),
         "structure_events": structure.get("events"),
-        "top_reasons": [r for b in top_reasons for r in b["reasons"][:1] if r],
+        "top_reasons":     [r for b in top_reasons for r in b["reasons"][:1] if r],
+        "candles":         htf_recent,
+        "key_levels":      htf_levels or None,
     }
 
 
@@ -262,7 +295,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     strategies = [
         {
             "name": b["label"], "weight": b["weight"], "score": b["score"],
-            "contribution": b["contribution"], "reasons": b["reasons"][:2],
+            "contribution": b["contribution"], "reasons": b["reasons"][:3],
         }
         for b in analysis["breakdown"]
     ]
@@ -270,9 +303,9 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     # ── Key structural levels ──────────────────────────────────────────────
     levels = {}
     if ov.get("support"):
-        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:4]]
+        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:8]]
     if ov.get("resistance"):
-        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:4]]
+        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:8]]
     if ov.get("volume_profile"):
         vp = ov["volume_profile"]
         levels["poc"] = _fnum(vp["poc"])
@@ -281,13 +314,13 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     if ov.get("order_blocks"):
         levels["order_blocks"] = [
             {"type": ob["type"], "top": _fnum(ob["top"]), "bottom": _fnum(ob["bottom"])}
-            for ob in ov["order_blocks"][:3]
+            for ob in ov["order_blocks"][:6]
         ]
-    # breaker blocks (new SMC)
+    # breaker blocks
     if ov.get("breaker_blocks"):
         levels["breaker_blocks"] = [
             {"type": bb["type"], "top": _fnum(bb["top"]), "bottom": _fnum(bb["bottom"])}
-            for bb in ov["breaker_blocks"][:3]
+            for bb in ov["breaker_blocks"][:6]
         ]
     # FVGs — support both old "fvgs" key and new "fvg" key
     fvg_list = ov.get("fvg") or ov.get("fvgs") or []
@@ -295,7 +328,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         levels["fvg"] = [
             {"type": f["type"], "top": _fnum(f["top"]), "bottom": _fnum(f["bottom"]),
              "mid": _fnum(f["mid"]), "displacement": f.get("displacement", False)}
-            for f in fvg_list[:4]
+            for f in fvg_list[:8]
         ]
     # Premium/discount zone
     if ov.get("premium_discount"):
@@ -323,14 +356,14 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     def _liquidity_context_enhanced(o):
         structure = o.get("structure") or {}
         return {
-            "sweeps":             o.get("sweeps") or [],
-            "inducements":        o.get("inducements") or [],
-            "liquidity_pools":    o.get("liquidity_pools") or [],
-            "liquidity_voids":    o.get("voids") or [],
-            "structure_trend":    structure.get("trend"),
-            "structure_events":   structure.get("events") or [],
-            "orderflow_divergence":   o.get("divergence"),
-            "macro_orderflow":    o.get("macro_flow"),
+            "sweeps":              (o.get("sweeps") or [])[:8],
+            "inducements":         (o.get("inducements") or [])[:6],
+            "liquidity_pools":     (o.get("liquidity_pools") or [])[:8],
+            "liquidity_voids":     (o.get("voids") or [])[:6],
+            "structure_trend":     structure.get("trend"),
+            "structure_events":    structure.get("events") or [],
+            "orderflow_divergence": o.get("divergence"),
+            "macro_orderflow":     o.get("macro_flow"),
         }
 
     fundamentals = ov.get("fundamentals")
