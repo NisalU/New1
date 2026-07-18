@@ -292,6 +292,7 @@ async def api_signal_status(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
+    global _active_symbol
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
     from stream import Client
@@ -365,7 +366,6 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
                 sym = msg.get("symbol", config.DEFAULT_SYMBOL)
                 ivl = msg.get("interval", config.DEFAULT_INTERVAL)
                 if _valid_symbol(sym) and ivl in config.INTERVALS:
-                    global _active_symbol
                     old_sym = _active_symbol
                     # Switch the single watched coin
                     _active_symbol = sym
