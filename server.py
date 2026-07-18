@@ -12,12 +12,10 @@ Keys can be supplied three ways (highest priority first):
 """
 import asyncio
 import contextlib
-import getpass
 import json
 import logging
 import os
 import socket
-import sys
 import traceback
 from pathlib import Path
 import time
@@ -58,62 +56,6 @@ _priority_event: "asyncio.Event | None" = None
 # Terminal key prompting
 # ---------------------------------------------------------------------------
 
-def _prompt_for_keys() -> None:
-    """Interactively prompt for API keys that are not already in the environment.
-
-    Skipped entirely when:
-      - All required keys are already set (via env or .env file)
-      - stdin is not a TTY (Docker, CI, piped input)
-    """
-    # Skip if Groq key is already available
-    if os.environ.get("GROQ_API_KEY"):
-        return
-
-    # Skip if not running interactively
-    if not sys.stdin.isatty():
-        log.warning(
-            "No GROQ_API_KEY in environment and stdin is not a TTY — "
-            "AI analyst will be disabled. Set GROQ_API_KEY in your .env file."
-        )
-        return
-
-    print()
-    print("=" * 56)
-    print("  AI Trading Signal Bot — API Key Setup")
-    print("  Input is hidden; keys will not be displayed.")
-    print("  Tip: create a .env file to skip this prompt.")
-    print("=" * 56)
-    print()
-
-    print("  Groq API key is required for the AI analyst.")
-    print("  Get a free key at https://console.groq.com/keys")
-    print("  Press Enter to skip (AI analyst will be disabled).")
-    groq_key = getpass.getpass("  Groq API key: ").strip()
-    if groq_key:
-        os.environ["GROQ_API_KEY"] = groq_key
-        print("  [ok] Groq API key set.")
-    else:
-        print("  [skip] No Groq key — AI analyst disabled.")
-
-    print()
-
-    if not os.environ.get("BINANCE_API_KEY"):
-        print("  Binance API credentials (optional — for authenticated endpoints).")
-        binance_key = getpass.getpass("  Binance API key (Enter to skip): ").strip()
-        if binance_key:
-            os.environ["BINANCE_API_KEY"] = binance_key
-            binance_secret = getpass.getpass("  Binance API secret: ").strip()
-            if binance_secret:
-                os.environ["BINANCE_API_SECRET"] = binance_secret
-                print("  [ok] Binance credentials set.")
-            else:
-                print("  [skip] No secret — skipping Binance auth.")
-        else:
-            print("  [skip] No Binance key — public market data only.")
-
-    print()
-    print("=" * 56)
-    print()
 
 
 def _load_app_modules() -> None:
@@ -631,7 +573,6 @@ def _local_ip() -> str:
 
 
 if __name__ == "__main__":
-    _prompt_for_keys()
     _load_app_modules()
 
     print("=" * 56)
