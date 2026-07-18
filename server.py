@@ -115,6 +115,7 @@ async def index(_request: web.Request) -> web.StreamResponse:
 
 async def api_config(_request: web.Request) -> web.Response:
     return web.json_response({
+        "symbols":          config.SYMBOLS,
         "active_symbol":    _active_symbol or config.DEFAULT_SYMBOL,
         "intervals":        config.INTERVALS,
         "default_symbol":   config.DEFAULT_SYMBOL,
@@ -276,6 +277,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
         # ── Hello burst ──────────────────────────────────────────────────
         client.send({
             "type":               "config",
+            "symbols":            config.SYMBOLS,
             "active_symbol":      _active_symbol or config.DEFAULT_SYMBOL,
             "intervals":          config.INTERVALS,
             "default_symbol":     config.DEFAULT_SYMBOL,
