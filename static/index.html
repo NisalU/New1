@@ -152,6 +152,51 @@
       </section>
     </div>
 
+    <!-- Coin Scanner -->
+    <section class="card scanner-card" id="scanner-card">
+      <div class="card-head">
+        <h2>⊞ Coin Scanner <span class="scanner-mode-badge" id="scanner-mode-badge">Binance-only</span></h2>
+        <div class="scanner-head-right">
+          <span class="scanner-last-scan" id="scanner-last-scan"></span>
+          <button class="scan-btn" id="scan-btn" title="Run scanner now">Scan now</button>
+        </div>
+      </div>
+
+      <!-- Progress bar (visible while scanning) -->
+      <div class="scanner-progress-row" id="scanner-progress-row" style="display:none">
+        <div class="scanner-progress-bar"><div class="scanner-progress-fill" id="scanner-progress-fill"></div></div>
+        <span class="scanner-progress-label" id="scanner-progress-label">Scanning…</span>
+      </div>
+
+      <!-- Results table -->
+      <div class="scanner-table-wrap">
+        <table class="scanner-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>SYMBOL</th>
+              <th title="ATR(14) on 15m / price × 100">ATR%</th>
+              <th title="24h volume in millions USD">VOL</th>
+              <th title="7-day price change (CMC)">7d%</th>
+              <th title="Market cap in millions USD (CMC)">MCAP$M</th>
+              <th title="CMC sideways × quality multiplier">CMC×</th>
+              <th title="Final score: ATR% × vol_score × trend_mult × CMC×">SCORE</th>
+            </tr>
+          </thead>
+          <tbody id="scanner-tbody">
+            <tr class="scanner-empty-row">
+              <td colspan="8">Scanner hasn't run yet — results appear after first scan (~30 s)…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="scanner-footer">
+        <span class="scanner-hint" id="scanner-hint"></span>
+        <span class="scanner-best" id="scanner-best"></span>
+      </div>
+    </section>
+
     <!-- API Pipeline card — 3 stages (Critic removed) -->
     <section class="card pipeline-card" id="pipeline-card">
       <div class="card-head">

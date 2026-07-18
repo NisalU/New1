@@ -1562,6 +1562,12 @@
         case "pong":
           latencyEl.textContent = Math.max(1, Math.round(performance.now() - m.t)) + "ms";
           break;
+        case "scanner_results":
+          renderScanner(m.data);
+          break;
+        case "scanner_progress":
+          renderScannerProgress(m.progress);
+          break;
         case "error":
           liveDot.className = "dot err";
           break;
@@ -1652,6 +1658,117 @@
 
   symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); });
   intervalEl.addEventListener("change", function () { localStorage.setItem(LS_INT, intervalEl.value); reset(); });
+
+  /* ── Coin Scanner ─────────────────────────────────────────────────────────── */
+
+  var _scannerScannedAt = 0;
+
+  function renderScannerProgress(msg) {
+    var row   = document.getElementById("scanner-progress-row");
+    var label = document.getElementById("scanner-progress-label");
+    var btn   = document.getElementById("scan-btn");
+    if (row)   row.style.display   = "flex";
+    if (label) label.textContent   = msg || "Scanning…";
+    if (btn)   btn.disabled        = true;
+  }
+
+  function renderScanner(data) {
+    if (!data) return;
+    var tbody     = document.getElementById("scanner-tbody");
+    var modeBadge = document.getElementById("scanner-mode-badge");
+    var lastScan  = document.getElementById("scanner-last-scan");
+    var hint      = document.getElementById("scanner-hint");
+    var bestEl    = document.getElementById("scanner-best");
+    var progRow   = document.getElementById("scanner-progress-row");
+    var btn       = document.getElementById("scan-btn");
+
+    // Hide progress, re-enable button
+    if (progRow) progRow.style.display = "none";
+    if (btn)     btn.disabled = false;
+
+    // Mode badge
+    if (modeBadge) {
+      if (data.cmc_enabled) {
+        modeBadge.textContent = "CMC + Binance";
+        modeBadge.className   = "scanner-mode-badge cmc";
+      } else {
+        modeBadge.textContent = "Binance-only";
+        modeBadge.className   = "scanner-mode-badge";
+      }
+    }
+
+    // Last scan time
+    if (lastScan && data.scanned_at) {
+      _scannerScannedAt = data.scanned_at * 1000;
+      var d = new Date(_scannerScannedAt);
+      lastScan.textContent = "Last scan: " + d.toLocaleTimeString();
+    }
+
+    // Hint
+    if (hint) {
+      hint.textContent = data.cmc_enabled
+        ? "Score = ATR% × vol × trend × CMC (sideways × quality)"
+        : "No CMC_API_KEY — 7d%, market cap, CMC× unavailable (set env var for full scoring)";
+    }
+
+    // Best coin
+    if (bestEl) {
+      bestEl.textContent = data.best ? "⬢ Best: " + data.best : "";
+    }
+
+    // Table rows
+    if (!tbody) return;
+    var rows = data.results || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr class="scanner-empty-row"><td colspan="8">No results yet…</td></tr>';
+      return;
+    }
+
+    var html = "";
+    rows.forEach(function (r, i) {
+      var rank  = i + 1;
+      var best  = rank === 1;
+      var rowCls = best ? "scanner-row-best" : "";
+
+      // 7d% colour
+      var chg7dCls = r.chg7d > 0.5 ? "scanner-chg-pos" : r.chg7d < -0.5 ? "scanner-chg-neg" : "scanner-chg-neu";
+      var chg7dTxt = r.chg7d ? (r.chg7d > 0 ? "+" : "") + r.chg7d.toFixed(1) + "%" : "—";
+
+      // CMC×
+      var cmcTxt = r.cmc_mult ? r.cmc_mult.toFixed(2) : "0.60";
+
+      // MCAP$M
+      var mcapTxt = r.mcap_m ? r.mcap_m.toLocaleString() : "—";
+
+      // Trend penalty indicator
+      var trendNote = r.trend_m < 1.0 ? " ⚡" : "";
+
+      html += '<tr class="' + rowCls + '">'
+        + '<td class="scanner-rank">' + rank + '</td>'
+        + '<td class="scanner-sym">' + r.symbol + (best ? '<span class="scanner-best-star">★</span>' : '') + '</td>'
+        + '<td class="scanner-atr">' + r.atr_pct.toFixed(2) + '%</td>'
+        + '<td class="scanner-vol">' + r.vol_m.toFixed(0) + 'M</td>'
+        + '<td class="' + chg7dCls + '">' + chg7dTxt + '</td>'
+        + '<td class="scanner-mcap">' + mcapTxt + '</td>'
+        + '<td class="scanner-cmc">' + cmcTxt + trendNote + '</td>'
+        + '<td class="scanner-score">' + r.score.toFixed(4) + '</td>'
+        + '</tr>';
+    });
+    tbody.innerHTML = html;
+  }
+
+  // Scan button — trigger manual rescan
+  (function () {
+    var btn = document.getElementById("scan-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      renderScannerProgress("Requesting scan…");
+      fetch("/api/scanner/trigger", { method: "POST" })
+        .then(function (r) { return r.json(); })
+        .catch(function () { btn.disabled = false; });
+    });
+  })();
 
   connect();
 })();

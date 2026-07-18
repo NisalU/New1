@@ -92,3 +92,17 @@ AI_PROMPT_MEMORY_ROWS = 3
 
 # ---- Limit signals ----
 LIMIT_SIGNALS_ENABLED = True
+
+# ---- Coin Scanner ----
+CMC_API_KEY            = os.environ.get("CMC_API_KEY", "")   # optional
+SCANNER_AUTO_SCAN      = True        # run automatically on startup + every N hours
+SCANNER_INTERVAL_HOURS = 2           # hours between automatic re-scans
+SCANNER_MIN_VOL_M      = 50          # minimum 24h volume in millions USD
+SCANNER_BLACKLIST      = ["BTCUSDT", "ETHUSDT"]   # always-excluded symbols
+SCANNER_SHOW_TOP       = 10          # rows shown in the dashboard table
+SCANNER_TREND_PENALTY  = True        # discount strongly trending coins
+SCANNER_TREND_HOURS    = 4           # look-back window for trend detection
+SCANNER_TREND_PCT      = 3.0         # |move| threshold that triggers penalty
+SCANNER_TREND_MULT     = 0.5         # multiplier applied when trend is detected
+CMC_MIN_MARKET_CAP_M   = 100         # minimum market cap in millions USD
+CMC_QUALITY_MIDCAP_M   = 10_000      # mid-cap threshold in millions USD

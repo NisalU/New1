@@ -23,6 +23,7 @@ config     = None  # type: ignore[assignment]
 ai_analyst = None  # type: ignore[assignment]
 engine     = None  # type: ignore[assignment]
 manager    = None  # type: ignore[assignment]
+scanner    = None  # type: ignore[assignment]
 
 # ── Priority queue for immediate AI analysis on symbol switch ────────────────
 # Symbols added here jump to the front of _ai_loop's queue.
@@ -74,20 +75,23 @@ def _prompt_for_keys() -> None:
 
 
 def _load_app_modules() -> None:
-    global config, ai_analyst, engine, manager
+    global config, ai_analyst, engine, manager, scanner
 
     import config as _config
     from ai_analyst import ai_analyst as _ai_analyst
     from engine import engine as _engine
     from stream import manager as _manager
+    from scanner import scanner as _scanner
 
     _config.BINANCE_API_KEY    = os.environ.get("BINANCE_API_KEY", "")
     _config.BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+    _config.CMC_API_KEY        = os.environ.get("CMC_API_KEY", "")
 
     config     = _config
     ai_analyst = _ai_analyst
     engine     = _engine
     manager    = _manager
+    scanner    = _scanner
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +169,19 @@ async def api_pipeline_events(_request: web.Request) -> web.Response:
     })
 
 
+async def api_scanner(_request: web.Request) -> web.Response:
+    """Return the latest scanner results (or current scanning progress)."""
+    return web.json_response(scanner.get_state())
+
+
+async def api_scanner_trigger(_request: web.Request) -> web.Response:
+    """Kick off an immediate rescan. Results arrive via WebSocket scanner_results."""
+    if scanner.get_state()["scanning"]:
+        return web.json_response({"status": "already_scanning"})
+    asyncio.create_task(_run_scan_once())
+    return web.json_response({"status": "scanning"})
+
+
 async def api_pending_limits(request: web.Request) -> web.Response:
     """Return pending LIMIT order signals (waiting for price to reach entry)."""
     symbol = request.query.get("symbol")
@@ -233,6 +250,12 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             client.send({"type": "pending_limits",   "data": ai_analyst.get_pending_limits(client.symbol)})
             # Send countdown for default symbol
             _push_countdown(client, client.symbol)
+        # Push cached scanner results immediately if available
+        scan_state = scanner.get_state()
+        if scan_state["results"]:
+            client.send({"type": "scanner_results", "data": scan_state})
+        elif scan_state["scanning"]:
+            client.send({"type": "scanner_progress", "progress": scan_state["progress"]})
         manager.add_client(client)
 
         async def push_snapshot(symbol, interval):
@@ -455,6 +478,44 @@ async def _ai_loop() -> None:
 import time as _time_mod  # noqa: E402 (used in _ai_loop)
 
 
+def _broadcast_all(msg: dict) -> None:
+    """Send a message to every connected WebSocket client."""
+    if manager is None:
+        return
+    for c in manager.clients:
+        c.send(msg)
+
+
+async def _run_scan_once() -> None:
+    """Run one full scan in a thread, broadcast progress + results via WS."""
+    def _on_progress(msg: str):
+        _broadcast_all({"type": "scanner_progress", "progress": msg})
+
+    _broadcast_all({"type": "scanner_progress", "progress": "Starting scan…"})
+    try:
+        result = await asyncio.to_thread(scanner.scan, _on_progress)
+        _broadcast_all({"type": "scanner_results", "data": result})
+    except Exception:
+        traceback.print_exc()
+        _broadcast_all({"type": "scanner_progress", "progress": "Scan failed — see server logs"})
+
+
+async def _scanner_loop() -> None:
+    """Periodically run the coin scanner and broadcast results to all clients."""
+    # Small delay so the rest of the server is warm before the first expensive scan
+    await asyncio.sleep(10)
+    while True:
+        try:
+            if getattr(config, "SCANNER_AUTO_SCAN", True) and scanner.should_scan():
+                await _run_scan_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            traceback.print_exc()
+        # Re-check every 60 s; actual scan only fires when should_scan() is True
+        await asyncio.sleep(60)
+
+
 # ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
@@ -473,10 +534,13 @@ async def on_startup(app: web.Application) -> None:
         print("[binance] API key configured")
     else:
         print("[binance] No API key — public endpoints only")
+    app["scanner_task"] = asyncio.create_task(_scanner_loop())
+    cmc_note = "with CMC" if getattr(config, "CMC_API_KEY", "") else "Binance-only"
+    print(f"[scanner] Coin scanner enabled ({cmc_note}) — first scan in ~10 s")
 
 
 async def on_cleanup(app: web.Application) -> None:
-    for key in ("ai_task", "status_task"):
+    for key in ("ai_task", "status_task", "scanner_task"):
         task = app.get(key)
         if task:
             task.cancel()
@@ -498,6 +562,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/pipeline-events",    api_pipeline_events)
     app.router.add_get("/api/signal-status",      api_signal_status)
     app.router.add_get("/api/pending-limits",     api_pending_limits)
+    app.router.add_get("/api/scanner",            api_scanner)
+    app.router.add_post("/api/scanner/trigger",   api_scanner_trigger)
     app.router.add_get("/ws",                     ws_endpoint)
     app.router.add_static("/static", BASE_DIR / "static", name="static")
     app.on_startup.append(on_startup)

@@ -32,6 +32,10 @@ _futures_cache = {}        # symbol -> (expires_at, data)
 TICKER_TTL = 10            # s — 24h ticker doesn't need per-snapshot fetches
 FUTURES_TTL = 120          # s — funding/OI/LS move slowly; saves 3 HTTP calls per snapshot
 
+# Scanner helpers
+_all_fut_tickers_cache: list = [0.0, []]  # [expires_at, data]
+ALL_FUT_TICKERS_TTL = 60   # s
+
 
 class DataError(Exception):
     pass
@@ -229,6 +233,57 @@ def get_open_orders(symbol=None):
         "/api/v3/openOrders", params, signed=True,
     )
     return data
+
+
+def get_all_futures_tickers():
+    """Return list of all Binance USDT-futures 24h ticker dicts (cached 60 s).
+
+    Each dict has: symbol, lastPrice, quoteVolume, priceChangePercent, etc.
+    Used by the coin scanner to find liquid candidates without iterating every symbol.
+    """
+    global _fut_base, _fut_disabled_until
+    now = time.time()
+    with _cache_lock:
+        if _all_fut_tickers_cache[0] > now:
+            return list(_all_fut_tickers_cache[1])
+    if now < _fut_disabled_until:
+        return []
+    try:
+        data, base = _get(
+            config.FUTURES_ENDPOINTS, _fut_base,
+            "/fapi/v1/ticker/24hr", {},
+        )
+        _fut_base = base
+        result = data if isinstance(data, list) else []
+        with _cache_lock:
+            _all_fut_tickers_cache[0] = now + ALL_FUT_TICKERS_TTL
+            _all_fut_tickers_cache[1] = result
+        return list(result)
+    except DataError:
+        _fut_disabled_until = now + 600
+        return []
+
+
+def get_futures_klines(symbol, interval, limit=50):
+    """Return raw Binance futures klines as list-of-lists (newest last).
+
+    Each row: [openTime, open, high, low, close, volume, closeTime, quoteVol, ...]
+    Used by the scanner for ATR(14) and trend-penalty calculations.
+    """
+    global _fut_base, _fut_disabled_until
+    now = time.time()
+    if now < _fut_disabled_until:
+        raise DataError("futures endpoint temporarily disabled")
+    try:
+        data, base = _get(
+            config.FUTURES_ENDPOINTS, _fut_base,
+            "/fapi/v1/klines",
+            {"symbol": symbol, "interval": interval, "limit": limit},
+        )
+        _fut_base = base
+        return data if isinstance(data, list) else []
+    except DataError:
+        raise
 
 
 def place_order(symbol, side, order_type, quantity, price=None, time_in_force="GTC"):

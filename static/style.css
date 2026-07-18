@@ -467,6 +467,118 @@ select:hover { border-color: #38bdf8; }
   100% { left: calc(100% + 4px); opacity: 0; transform: translateY(-50%) scale(.5); }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   COIN SCANNER CARD
+   ═══════════════════════════════════════════════════════════════════════════ */
+.scanner-card { padding: 1.1rem 1.2rem 1rem; }
+
+.scanner-card .card-head { align-items: center; margin-bottom: .7rem; }
+.scanner-card h2 { display: flex; align-items: center; gap: .5rem; }
+
+.scanner-mode-badge {
+  font-size: .65rem; font-weight: 600; letter-spacing: .04em;
+  padding: .15rem .45rem; border-radius: 3px;
+  background: rgba(56,189,248,.12); color: #38bdf8;
+  border: 1px solid rgba(56,189,248,.25);
+  text-transform: uppercase;
+}
+.scanner-mode-badge.cmc { background: rgba(250,204,21,.1); color: #fbbf24;
+  border-color: rgba(250,204,21,.25); }
+
+.scanner-head-right { display: flex; align-items: center; gap: .7rem; flex-shrink: 0; }
+
+.scanner-last-scan { font-size: .7rem; color: var(--muted); white-space: nowrap; }
+
+.scan-btn {
+  font-family: var(--font); font-size: .72rem; font-weight: 600;
+  padding: .3rem .75rem; border-radius: 5px; cursor: pointer;
+  background: rgba(56,189,248,.12); color: #38bdf8;
+  border: 1px solid rgba(56,189,248,.3);
+  transition: background .15s, transform .1s;
+}
+.scan-btn:hover  { background: rgba(56,189,248,.22); }
+.scan-btn:active { transform: scale(.96); }
+.scan-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Progress bar */
+.scanner-progress-row {
+  display: flex; align-items: center; gap: .8rem;
+  margin-bottom: .7rem;
+}
+.scanner-progress-bar {
+  flex: 1; height: 3px; border-radius: 2px;
+  background: rgba(255,255,255,.06);
+  overflow: hidden;
+}
+.scanner-progress-fill {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  border-radius: 2px;
+  animation: scanner-stripe 1.4s linear infinite;
+  background-size: 200% 100%;
+}
+@keyframes scanner-stripe {
+  0%   { background-position: 200% 0; }
+  100% { background-position:   0% 0; }
+}
+.scanner-progress-label { font-size: .7rem; color: var(--muted); white-space: nowrap; min-width: 12ch; }
+
+/* Table */
+.scanner-table-wrap { overflow-x: auto; }
+.scanner-table {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--font); font-size: .75rem;
+}
+.scanner-table thead th {
+  text-align: right; padding: .3rem .5rem;
+  color: var(--muted); font-weight: 500;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+  white-space: nowrap;
+}
+.scanner-table thead th:nth-child(1),
+.scanner-table thead th:nth-child(2) { text-align: left; }
+.scanner-table tbody td {
+  text-align: right; padding: .35rem .5rem;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  white-space: nowrap;
+  transition: background .15s;
+}
+.scanner-table tbody td:nth-child(1),
+.scanner-table tbody td:nth-child(2) { text-align: left; }
+
+.scanner-table tbody tr:hover td { background: rgba(255,255,255,.03); }
+
+/* Best coin row */
+.scanner-row-best td { background: rgba(56,189,248,.06) !important; }
+.scanner-row-best td:nth-child(2) { color: #38bdf8; font-weight: 700; }
+.scanner-row-best .scanner-score { color: #38bdf8; font-weight: 700; }
+
+/* Cell colours */
+.scanner-rank   { color: var(--muted); }
+.scanner-sym    { font-weight: 600; }
+.scanner-atr    { color: #f0c060; }
+.scanner-vol    { color: #94a3b8; }
+.scanner-chg-pos { color: #4ade80; }
+.scanner-chg-neg { color: #f87171; }
+.scanner-chg-neu { color: var(--muted); }
+.scanner-mcap   { color: #94a3b8; }
+.scanner-cmc    { color: #a78bfa; }
+.scanner-score  { color: #e2e8f0; font-weight: 600; }
+.scanner-best-star { color: #38bdf8; font-weight: 700; margin-left: .25rem; }
+
+.scanner-empty-row td {
+  color: var(--muted); font-size: .72rem; text-align: center !important;
+  padding: 1.2rem .5rem;
+}
+
+/* Footer */
+.scanner-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: .6rem; gap: .5rem; flex-wrap: wrap;
+}
+.scanner-hint { font-size: .67rem; color: var(--muted); }
+.scanner-best { font-size: .72rem; color: #4ade80; font-weight: 600; }
+
 /* ── "AI analysing" — enhanced active-stage pulse ──────────────────────── */
 /* Adds a second, slower outer glow ring so the pulsing is obvious on mobile */
 .pipe-stage.active .pipe-node-ring {
