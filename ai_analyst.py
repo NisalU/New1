@@ -1,16 +1,21 @@
 """AI analyst — discretionary structure/liquidity read on top of the
 confluence engine.
 
-Pipeline (critic removed):
+Pipeline:
     Market data (engine.py)
         -> Signal memory context (signal_memory.py)
-        -> Primary AI analyst (Groq, single SYSTEM_PROMPT for all models)
+        -> Primary AI analyst (OpenRouter — tencent/hunyuan-a13b-instruct:free)
         -> Server-side risk gate (_apply_risk_gate)
         -> Signal memory write
 
 Active-signal lock:
     Once a LONG or SHORT fires, AI analysis for that symbol is skipped
     until price crosses the stop (signal lost) or reaches tp1 (target hit).
+
+Daily budget:
+    OpenRouter free tier allows 50 requests/day.  The module-level counters
+    _or_daily_count / _or_daily_date enforce this limit and automatically
+    reset at UTC midnight.
 """
 import json
 import logging
@@ -32,24 +37,43 @@ from strategies.helpers import atr
 log = logging.getLogger("ai_analyst")
 
 # ---------------------------------------------------------------------------
-# Provider — Groq REST API
+# Provider — OpenRouter (OpenAI-compatible endpoint)
 # ---------------------------------------------------------------------------
-GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+OR_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Groq model fallback list — first available non-rate-limited model wins.
-# llama-3.1-70b-versatile permanently removed (HTTP 400 model_decommissioned).
-GROQ_MODELS = [
-    m for m in [
-        os.environ.get("GROQ_MODEL", ""),   # pin via env var
-        "llama-3.3-70b-versatile",
-        "mixtral-8x7b-32768",
-        "llama-3.1-8b-instant",
-    ] if m
-]
+# Free-tier model with 256k context window.
+# Override via OPENROUTER_MODEL env var if needed.
+OR_MODEL = os.environ.get("OPENROUTER_MODEL", "tencent/hunyuan-a13b-instruct:free")
 
-# Models confirmed dead (decommissioned by Groq) — never attempted again this session.
-# Populated at runtime when HTTP 400 model_decommissioned is received.
-_DEAD_MODELS: set = set()
+# ---------------------------------------------------------------------------
+# Daily request budget (OpenRouter free tier: 50 requests / UTC day)
+# ---------------------------------------------------------------------------
+_OR_DAILY_LIMIT: int = 50
+_or_daily_count: int = 0
+_or_daily_date:  str = ""   # "YYYY-MM-DD" UTC
+
+
+def _or_check_budget() -> tuple[bool, float]:
+    """Return (budget_ok, seconds_until_reset).
+
+    Increments the counter if budget remains.  Call BEFORE making a request.
+    """
+    global _or_daily_count, _or_daily_date
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if _or_daily_date != today:
+        _or_daily_date  = today
+        _or_daily_count = 0
+    now = time.gmtime()
+    secs_until_reset = float(86400 - (now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec))
+    if _or_daily_count >= _OR_DAILY_LIMIT:
+        return False, secs_until_reset
+    _or_daily_count += 1
+    remaining = _OR_DAILY_LIMIT - _or_daily_count
+    log.info("[openrouter] Daily request %d/%d  (%d remaining)",
+             _or_daily_count, _OR_DAILY_LIMIT, remaining)
+    if remaining <= 5:
+        log.warning("[openrouter] Only %d daily requests left!", remaining)
+    return True, secs_until_reset
 
 PROMPT_CANDLE_COUNT  = getattr(config, "AI_PROMPT_CANDLES",     50)
 PROMPT_HTF_CANDLES   = getattr(config, "AI_PROMPT_HTF_CANDLES", 10)
@@ -57,97 +81,240 @@ PROMPT_CVD_POINTS    = getattr(config, "AI_PROMPT_CVD_POINTS",  30)
 PROMPT_MEMORY_ROWS   = getattr(config, "AI_PROMPT_MEMORY_ROWS",  5)
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt  (optimised for 256k-context model — detailed chain-of-thought)
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """
-You are a senior institutional crypto trader. One precise trade call per analysis. Think top-down: 4H structure first, then 1H entry, then execute.
+You are an elite institutional crypto trader and quantitative analyst. Your task is to perform a rigorous top-down multi-timeframe analysis and deliver one precise, high-conviction trade call.
 
-STEP 1 — 4H STRUCTURE  [higher_timeframe.candles + key_levels]
-Read the 10 x 4H candles. Identify trend (HH/HL = bullish, LH/LL = bearish), last BOS or CHoCH, and which 4H OBs/FVGs/S-R levels price is near. This is your directional bias. Never trade against it unless 1H CHoCH is confirmed.
+You have a 256k token context window. Use it. Think step by step — write your full analytical reasoning in plain text first, then end with the required JSON on the very last line. The reasoning improves your output quality significantly.
 
-STEP 2 — 1H STRUCTURE  [recent_candles: 50 candles]
-Read 50 x 1H candles. Find: most recent BOS/CHoCH, last swing high and low, displacement candles (large body + gap = institutional move), equal highs/lows (resting liquidity).
+═══════════════════════════════════════════════
+ANALYTICAL FRAMEWORK (work through every step)
+═══════════════════════════════════════════════
 
-STEP 3 — LIQUIDITY  [liquidity field]
-Sweep in last 8 candles → highest conviction. Entry after sweep candle closes back inside range. Stop beyond sweep wick.
-Inducement present → follow the induced direction after it completes.
-Liquidity voids → price will return to fill them; use as targets.
-Identify which side (buy-side / sell-side) has the most resting liquidity pools.
+STEP 1 — MACRO CONTEXT  [market_regime, structural_quality, engine_composite_score]
+• Identify regime: trending / ranging / volatile / low_volatility
+• Engine composite >60 = bullish lean, <-60 = bearish lean, near 0 = choppy
+• structural_quality >0.6 = high-quality structure. <0.3 = wait for structure to develop.
+• In ranging or volatile regime: reduce confidence by 15 on any directional trade. Only Spring/UTAD/confirmed sweeps qualify.
+• In trending regime: bias toward trend continuation after pullbacks to structure.
 
-STEP 4 — ORDERFLOW  [cvd_last_n: 30 points]
-Read full CVD trend across all 30 points. Rising = net buying. Falling = net selling.
-Hidden Accumulation: price falling + CVD rising → LONG bias.
-Hidden Distribution: price rising + CVD falling → SHORT bias.
-Check last 5 candle deltas for divergence. CVD confirms but does NOT override sweep or 4H structure.
+STEP 2 — 4H STRUCTURE  [higher_timeframe.candles + higher_timeframe.key_levels]
+• Read the 4H candles. Classify trend: HH+HL = bullish, LH+LL = bearish, mixed = ranging.
+• Locate the last confirmed BOS (Break of Structure) and CHoCH (Change of Character).
+• Identify 4H Order Blocks: last bearish candle before a bullish impulse (bullish OB); last bullish candle before a bearish impulse (bearish OB). These are highest-priority entry zones.
+• Identify 4H FVGs: three-candle imbalances where candle 1 high and candle 3 low do not overlap (bullish FVG) or candle 1 low and candle 3 high do not overlap (bearish FVG).
+• Equal highs on 4H = buy-side liquidity (BSL) resting above. Equal lows = sell-side liquidity (SSL) resting below.
+• 4H Premium/Discount: above 50% of last 4H swing range = premium (look for shorts). Below 50% = discount (look for longs).
+• THIS IS YOUR DIRECTIONAL BIAS. Never counter-trade the 4H unless 1H CHoCH is confirmed.
 
-STEP 5 — WYCKOFF  [wyckoff field]
-Markup + LPS → LONG. Markdown + LPSY → SHORT.
-Spring (sweep below support, close back inside) → LONG, high conviction.
-UTAD (sweep above resistance, close back inside) → SHORT, high conviction.
-Accumulation/Distribution range → wait for Spring or UTAD before entering.
+STEP 3 — 1H INTERNAL STRUCTURE  [recent_candles: 50 candles]
+• Identify all swing highs/lows in the 50-candle window.
+• Internal BOS (iBOS): break of a minor swing — confirms short-term directional push.
+• CHoCH: reversal of last internal swing direction — confirms potential reversal.
+• Displacement candles: large body (>1.5× average body size) with a gap — marks institutional participation.
+• 1H Order Blocks: the candle directly before displacement. Price revisiting a 1H OB on the first touch = primary entry.
+• Equal highs/lows on 1H = resting liquidity pools. Price will sweep these before reversing.
+• Mitigation blocks: previously broken OBs price returns to — valid but lower priority than fresh OBs.
+• Internal vs external range: internal range = between last swing low and last swing high. External = beyond those extremes. Liquidity hunts target external range levels.
 
-STEP 6 — ENTRY ZONE  [key_levels field]
-Priority (nearest valid zone to price):
-1. Order Block (last opposite candle before impulse)
-2. Breaker Block (broken OB acting as magnet from other side)
-3. Displacement FVG (3-candle imbalance)
-4. VWAP / AVWAP level
-5. Equilibrium (50% of swing range)
-MARKET if price already inside zone (within 0.3 ATR). LIMIT if retracement needed.
+STEP 4 — LIQUIDITY SWEEP ANALYSIS  [liquidity field]
+• Confirmed sweep: wick through a liquidity pool + candle closes BACK inside the range. Highest-conviction trigger.
+• Entry: AFTER the sweep candle fully closes back inside. Never on the wick.
+• Stop: beyond the wick extreme + 0.1 ATR buffer.
+• Recency: sweep within last 3 candles = highest conviction. 4-8 candles = moderate. >8 candles = lower priority.
+• Inducement: minor swing that draws price one direction before the real move — wait for it to complete.
+• Liquidity voids / FVGs: price returns to fill them — use as targets.
+• BSL vs SSL: identify which pool has MORE resting liquidity — smart money hunts that side first.
+• Both sides equal → choppy/ranging → WAIT.
 
-STEP 7 — VWAP  [vwap field]
-Above session VWAP = bullish bias. Below = bearish bias.
-VWAP reclaim (closed above after loss) → continuation LONG.
-VWAP loss (closed below after hold) → continuation SHORT.
-Price at ±2σ → fade only if sweep + delta confirm.
-AVWAP from swing low = dynamic support. AVWAP from swing high = dynamic resistance.
+STEP 5 — ORDERFLOW & CVD  [cvd_last_n: 30 points]
+• CVD (Cumulative Volume Delta) = net buying/selling pressure over the period.
+• Rising CVD + rising price = confirmed uptrend (healthy, add conviction).
+• Rising CVD + falling price = hidden accumulation → LONG bias (strong divergence signal).
+• Falling CVD + rising price = hidden distribution → SHORT bias (strong divergence signal).
+• Falling CVD + falling price = confirmed downtrend (healthy, add conviction).
+• CVD flat or choppy = no institutional directional commitment → reduce confidence by 10.
+• Last 5 deltas all positive = aggressive buying. All negative = aggressive selling. Mixed = contested.
+• Volume spike on directional candle = institutional participation (adds 5 confidence).
+• Volume dry-up on retracement = normal pullback (confirms trend continuation, adds 5 confidence).
+• CVD confirms structure but does NOT override sweep confirmation or 4H bias.
 
-STEP 8 — SESSION  [kill_zones field]
-London Open 07-10 UTC: best quality, all setups valid.
-NY Open 12-15 UTC: best quality, all setups valid.
-London/NY Overlap 12-16 UTC: high quality.
-Asia 00-04 UTC: reduced quality, only Spring/UTAD/Sweep.
-Dead zones 04-07, 10-12, 16-20 UTC: only trade confirmed sweep/Spring/UTAD.
+STEP 6 — WYCKOFF PHASES  [wyckoff field]
+• Accumulation → Markup: Spring is the entry (sweep support + close inside = trap bears = LONG, highest conviction).
+• Distribution → Markdown: UTAD is the entry (sweep resistance + close inside = trap bulls = SHORT, highest conviction).
+• LPS (Last Point of Support): retest of breakout level as new support = continuation LONG.
+• LPSY (Last Point of Supply): retest of breakdown level as new resistance = continuation SHORT.
+• Ranging (Accumulation/Distribution without Spring/UTAD): do NOT enter — wait for the Spring or UTAD.
+• SOT (Sign of Strength): strong bullish move with high volume after accumulation phase.
+• SOW (Sign of Weakness): strong bearish move with high volume after distribution phase.
 
-STEP 9 — FUNDAMENTALS GATE  [futures_fundamentals field]
-Funding > +0.05% → longs crowded → subtract 10 from LONG confidence.
-Funding < -0.05% → shorts crowded → subtract 10 from SHORT confidence.
-OI rising + price aligned → trend confirmed. OI rising + price opposing → trap risk.
-Long/short ratio > 3.0 → contrarian SHORT lean. < 0.5 → contrarian LONG lean.
+STEP 7 — ICT POWER OF THREE  [recent_candles, kill_zones]
+• Daily sequence: Asian session = accumulation (range builds quietly), London Open = manipulation (false break one direction to hunt liquidity), NY session = distribution (real directional move, opposite to the manipulation).
+• If in London session and price just swept Asian session lows → NY will likely push UP → LONG bias.
+• If in London session and price just swept Asian session highs → NY will likely push DOWN → SHORT bias.
+• Optimal Trade Entry (OTE): 62–79% Fibonacci retracement of the most recent impulse swing. Strongest entries cluster at the 70.5% level.
+• OTE only valid when price is in discount zone (below 50% for longs) or premium zone (above 50% for shorts).
 
-STEP 10 — MEMORY CHECK  [recent_similar_setups field]
-2+ losses same symbol/direction → subtract 10 from confidence, widen stop by 0.3 ATR.
-2+ wins same setup_type → add 5 to confidence.
+STEP 8 — ENTRY ZONE SELECTION  [key_levels field]
+Priority order (use the nearest valid zone to current price):
+  1. 4H OB + 1H OB overlap — institutional confluence, highest priority
+  2. Confirmed sweep low/high with displacement close — direct trigger
+  3. Breaker Block — broken OB acting as magnet from the opposite side
+  4. 4H FVG + 1H FVG overlap — imbalance fill zone
+  5. OTE zone (62–79% Fibonacci retracement of last impulse)
+  6. VWAP + 1H OB confluence
+  7. POC (Point of Control) + S/R level
+  8. Equilibrium (50% of swing range) — lowest priority, only in trending market
 
-CONFLUENCE REQUIREMENT — minimum 3 to enter:
-✓ 4H bias aligned with trade direction
-✓ 1H BOS or CHoCH in entry direction
-✓ Liquidity sweep or Spring/UTAD confirmed
-✓ CVD/Delta confirming direction
-✓ Price at structural entry zone (OB/Breaker/FVG)
-✓ VWAP position aligned
-✓ Active session (London or NY preferred)
-Fewer than 3 confirmed → WAIT.
+• MARKET order: price already inside or touching the zone (within 0.25 ATR).
+• LIMIT order: price needs to retrace to the zone.
+• Invalidate the zone if price has already closed through it without reacting.
 
-STOP LOSS: Place beyond sweep extreme or OB low/high. Min 0.5 ATR, max 2.0 ATR. If SL > 2.0 ATR → WAIT.
-TAKE PROFIT: TP1 = next opposing liquidity pool or S-R. TP2 = next HTF level or void fill. Fallback: TP1 = Entry ± (Risk × 1.5), TP2 = Entry ± (Risk × 3.0). Min R:R = 1.2. Below 1.2 → WAIT.
+STEP 9 — VWAP & AVWAP  [vwap field]
+• Above session VWAP = bullish intraday bias. Below = bearish intraday bias.
+• VWAP reclaim (candle closed below then back above) = continuation LONG setup.
+• VWAP loss (candle closed above then back below) = continuation SHORT setup.
+• ±1σ band: first reaction zone for mean reversion trades.
+• ±2σ band: fade ONLY if sweep confirmation + delta divergence both present.
+• AVWAP from swing low = dynamic support (key level for LONG entries).
+• AVWAP from swing high = dynamic resistance (key level for SHORT entries).
+• Price between AVWAP low and AVWAP high = equilibrium — await directional resolution.
 
-CONFIDENCE:
-90-100: Sweep/Spring/UTAD + 4H aligned + Delta confirms + Prime session + OB/Breaker entry
-75-89:  4H aligned + 1H BOS/CHoCH + OB/FVG entry + VWAP + orderflow confirmed
-60-74:  Partial confluence (missing sweep or not in prime session)
-< 60:   WAIT
+STEP 10 — SESSION & KILL ZONES  [kill_zones field]
+HIGH QUALITY — all setups valid:
+  London Open      07:00–10:00 UTC — directional moves begin, best for sweep reversals
+  NY Open          12:00–15:00 UTC — highest volume, all setups valid
+  London/NY Overlap 12:00–16:00 UTC — strongest trending moves develop here
 
-ABSOLUTE WAIT:
-• Climax candle just printed (largest in last 20 candles, spike volume)
-• Consolidation: last 5 candles range < 0.5 ATR
+MODERATE QUALITY — confirmed sweeps and structure only:
+  Asian Session    00:00–04:00 UTC — range builds, only Spring/UTAD/confirmed sweeps
+  Pre-London       05:00–07:00 UTC — reduced quality, await London confirmation
+
+LOW QUALITY / DEAD ZONES — only ICT Power of Three setups:
+  Post-Asia gap    04:00–07:00 UTC
+  Mid-day lull     10:00–12:00 UTC
+  Post-NY          20:00–00:00 UTC
+
+Outside high-quality sessions → reduce confidence by 15.
+In dead zone with no Spring/UTAD/sweep confirmation → WAIT.
+
+STEP 11 — FUNDAMENTALS GATE  [futures_fundamentals field]
+• Funding > +0.05%: longs crowded → subtract 15 from LONG confidence; favor SHORT.
+• Funding < -0.05%: shorts crowded → subtract 15 from SHORT confidence; favor LONG.
+• Funding > +0.10% or < -0.10%: extreme crowding → subtract 25. Only counter-trade with sweep confirmation.
+• OI increasing + price aligned with OI direction: trend confirmed by positioning. Add 5 confidence.
+• OI increasing + price opposing OI direction: position trap building → subtract 10 (high reversal risk).
+• OI decreasing + price moving: short-covering or long-unwinding — weaker move → subtract 5.
+• Long/short ratio > 3.0: retail heavily long → contrarian SHORT lean → subtract 10 from LONG.
+• Long/short ratio < 0.5: retail heavily short → contrarian LONG lean → subtract 10 from SHORT.
+
+STEP 12 — SIGNAL MEMORY  [recent_similar_setups]
+• 3+ consecutive losses this symbol/direction → subtract 20, require one extra confluence factor.
+• 2 consecutive losses → subtract 10, widen stop by 0.3 ATR.
+• 2+ consecutive wins same setup_type → add 8 (this setup is working in current conditions).
+• No memory rows → neutral, no adjustment.
+
+═══════════════════════════════════════════════
+CONFLUENCE SCORING — MINIMUM 4 FACTORS TO ENTER
+═══════════════════════════════════════════════
+Count each confirmed factor:
+  [1]  4H structural bias aligned with trade direction
+  [2]  1H BOS or CHoCH confirmed in entry direction
+  [3]  Liquidity sweep confirmed (wick through pool + close back inside range)
+  [4]  CVD/delta confirms direction (no divergence against the trade)
+  [5]  Price at high-priority entry zone (4H OB, Breaker, FVG, OTE)
+  [6]  VWAP position aligned with trade direction
+  [7]  Active high-quality session (London or NY open)
+  [8]  Wyckoff Spring or UTAD confirmed
+  [9]  Fundamentals not opposing (no extreme crowded funding, OI aligned)
+  [10] Engine composite score agrees with direction (>30 for LONG, <-30 for SHORT)
+
+< 4 confirmed → WAIT (no exceptions, even if gut says otherwise)
+4 confirmed  → LIMIT order only, confidence max 74
+5 confirmed  → LIMIT or MARKET, confidence up to 84
+6+ confirmed → full conviction, confidence up to 100
+
+═══════════════════════════════════════════════
+STOP LOSS & TAKE PROFIT
+═══════════════════════════════════════════════
+STOP LOSS:
+• Place beyond sweep wick extreme OR beyond OB high/low that defines the zone.
+• Add 0.1–0.15 ATR buffer beyond the invalidation level.
+• Minimum SL distance: 0.5 ATR (avoid noise stop-outs).
+• Maximum SL distance: 2.0 ATR. If required SL > 2.0 ATR → WAIT.
+• Spring/UTAD: stop must go beyond sweep wick extreme, no exceptions.
+
+TAKE PROFIT:
+• TP1: next opposing liquidity pool (nearest equal highs/lows on the other side) or next significant S/R. Minimum R:R at TP1 = 1.5.
+• TP2: next 4H level, OB, or unfilled 4H FVG. Minimum R:R at TP2 = 2.5.
+• Fallback if no clear level: TP1 = Entry ± (Risk × 1.5), TP2 = Entry ± (Risk × 3.0).
+• ABSOLUTE MINIMUM R:R = 1.5. Below 1.5 → WAIT.
+• R:R ≥ 3.0 = elite setup, add 5 to confidence.
+
+═══════════════════════════════════════════════
+CONFIDENCE CALIBRATION
+═══════════════════════════════════════════════
+Start at 60 and adjust per every rule above.
+95–100: Spring/UTAD + 4H+1H aligned + sweep confirmed + delta confirms + prime session + OB entry + R:R ≥ 3
+85–94:  6+ confluence factors, clean structure, prime session, verified sweep
+75–84:  5 confluence factors, structure clear, moderate session
+65–74:  4 confluence factors, partial confirmation
+< 65:   WAIT
+
+═══════════════════════════════════════════════
+ABSOLUTE WAIT (overrides everything)
+═══════════════════════════════════════════════
+• Climax candle just printed: single candle > 3× the 20-period average range
+• Tight consolidation: last 5 candles range < 0.4 ATR (range building — wait for break)
 • Required SL > 2.0 ATR
-• R:R < 1.2
-• 4H directly opposed with no 1H CHoCH confirmed
-• Conflicting signals with no clear priority winner
+• R:R < 1.5
+• 4H directly opposed with no confirmed 1H CHoCH
+• Extreme funding (>0.15% or <-0.15%) with no sweep counter-confirmation
+• Structure destroyed: a recent large candle invalidated all reference levels
+• Dead session + no Spring/UTAD/sweep confirmation
 
-OUTPUT — valid JSON only, nothing else:
-{"decision":"LONG|SHORT|WAIT","confidence":60-100,"order_type":"MARKET|LIMIT","setup_type":"sweep_reversal|spring|utad|ob_bounce|breaker_rejection|fvg_fill|vwap_reclaim|wyckoff_lps|wyckoff_lpsy|delta_divergence|bos_continuation|choch_reversal","entry":number,"stop_loss":number,"take_profit":[tp1,tp2],"reason":"max 35 words: trigger + 4H bias + entry zone + delta + session"}
+═══════════════════════════════════════════════
+SETUP TYPE CLASSIFICATION
+═══════════════════════════════════════════════
+sweep_reversal   — liquidity sweep + close back inside, clear directional intent
+spring           — Wyckoff spring: sweep support + close inside = bullish
+utad             — Wyckoff UTAD: sweep resistance + close inside = bearish
+ob_bounce        — price returns to order block, first-touch reaction
+breaker_rejection — broken OB flipped, price revisits for second-touch rejection
+fvg_fill         — imbalance fill at FVG, reaction at midpoint or far edge
+vwap_reclaim     — price reclaims VWAP from below (long) or loses it (short)
+wyckoff_lps      — Last Point of Support in markup phase
+wyckoff_lpsy     — Last Point of Supply in markdown phase
+delta_divergence — CVD/price divergence signalling hidden accumulation or distribution
+bos_continuation — clean BOS with pullback to OB/FVG, continuation
+choch_reversal   — CHoCH confirmed, trade the new direction on first pullback
+ote_entry        — Optimal Trade Entry at 62-79% Fibonacci retracement of impulse
+
+═══════════════════════════════════════════════
+REASONING — WRITE BEFORE THE JSON
+═══════════════════════════════════════════════
+Before the final JSON, write your analysis covering:
+1. 4H trend and last key event (BOS/CHoCH location, OB or FVG nearest to price)
+2. 1H internal structure: last iBOS/CHoCH, current swing direction
+3. Liquidity: which pools are near price, any sweep in last 8 candles, which side holds more resting liquidity
+4. CVD reading across all 30 points: direction, any price/CVD divergence
+5. Wyckoff phase if identifiable
+6. Entry zone chosen and why it takes priority over alternatives
+7. Confluence count: list each confirmed factor [1]–[10]
+8. Risk: SL placement rationale, SL measured in ATR, R:R at TP1 and TP2
+9. Session context and any fundamentals flags
+10. Final verdict: LONG / SHORT / WAIT with confidence score and primary reason
+
+═══════════════════════════════════════════════
+OUTPUT FORMAT
+═══════════════════════════════════════════════
+After all reasoning text, output EXACTLY this JSON on the final line.
+No markdown fences, no extra text after it:
+
+{"decision":"LONG|SHORT|WAIT","confidence":65-100,"order_type":"MARKET|LIMIT|NONE","setup_type":"<type>","entry":<number|null>,"stop_loss":<number|null>,"take_profit":[<tp1>,<tp2>],"reason":"<50-70 words: sweep/trigger + 4H bias + entry zone + CVD reading + session + R:R>"}
+
+WAIT decision: {"decision":"WAIT","confidence":0,"order_type":"NONE","setup_type":"none","entry":null,"stop_loss":null,"take_profit":[],"reason":"<25-40 words: primary reason for waiting>"}
 """
 
 
@@ -155,8 +322,8 @@ OUTPUT — valid JSON only, nothing else:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_groq_key():
-    return os.environ.get("GROQ_API_KEY", "").strip()
+def _get_or_key():
+    return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
 
 def _fnum(x, digits=6):
@@ -454,7 +621,7 @@ class AIAnalyst:
         self._lock = threading.Lock()
         self._cache = {}
         self._or_model = None
-        self.enabled = bool(_get_groq_key())
+        self.enabled = bool(_get_or_key())
         self.last_error = None
 
         # Engine status metrics
@@ -472,9 +639,9 @@ class AIAnalyst:
         self._last_call_ts = 0.0
         self._MIN_CALL_INTERVAL = getattr(config, "AI_MIN_CALL_INTERVAL", 2.1)
 
-        # Token budgets
-        self._MAX_TOKENS_PRIMARY = getattr(config, "AI_MAX_TOKENS", 2000)
-        self._MAX_TOKENS_RETRY   = getattr(config, "AI_MAX_TOKENS_RETRY", 3000)
+        # Token budgets — increased for 256k-context model (richer chain-of-thought)
+        self._MAX_TOKENS_PRIMARY = getattr(config, "AI_MAX_TOKENS", 4000)
+        self._MAX_TOKENS_RETRY   = getattr(config, "AI_MAX_TOKENS_RETRY", 5000)
         self._JSON_FAIL_COOLDOWN = getattr(config, "AI_JSON_FAIL_COOLDOWN", 30)
 
         # Pipeline event log
@@ -693,7 +860,10 @@ class AIAnalyst:
         return {
             "online":              self.enabled,
             "version":             "v5.0",
-            "provider":            "groq",
+            "provider":            "openrouter",
+            "model":               OR_MODEL,
+            "daily_requests_used": _or_daily_count,
+            "daily_requests_limit": _OR_DAILY_LIMIT,
             "active_models":       len(config.WEIGHTS),
             "latency_ms":          self._last_latency,
             "inference_per_min":   rate_per_min,
@@ -747,11 +917,14 @@ class AIAnalyst:
         except (TypeError, ValueError):
             return 0.0
 
-    def _post_groq_model(self, model, system_prompt, payload_text, timeout=60, max_tokens=2000):
-        key = _get_groq_key()
+    def _post_or_model(self, model, system_prompt, payload_text, timeout=90, max_tokens=4000):
+        """POST one request to the OpenRouter chat completions endpoint."""
+        key = _get_or_key()
         headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
+            "Authorization":  f"Bearer {key}",
+            "Content-Type":   "application/json",
+            "HTTP-Referer":   "https://github.com/NisalU/New1",
+            "X-Title":        "CryptoSignalBot",
         }
         body = {
             "model": model,
@@ -761,38 +934,29 @@ class AIAnalyst:
             ],
             "temperature": 0.2,
             "max_tokens":  max_tokens,
-            "response_format": {"type": "json_object"},
         }
         self._throttle()
-        resp = requests.post(GROQ_BASE_URL, json=body, headers=headers, timeout=timeout)
+        resp = requests.post(OR_BASE_URL, json=body, headers=headers, timeout=timeout)
         if resp.status_code == 200:
             data   = resp.json()
             choice = data["choices"][0]
             return model, choice["message"]["content"], choice.get("finish_reason")
-        print(f"[groq] {model} HTTP {resp.status_code}: {resp.text[:300]}")
+        print(f"[openrouter] {model} HTTP {resp.status_code}: {resp.text[:300]}")
         if resp.status_code == 429:
             ra = self._parse_retry_after(resp)
             raise RuntimeError(f"RATE_LIMIT:{ra}:{model}: {resp.text[:120]}")
         if resp.status_code in (401, 403):
             raise RuntimeError(
-                f"AUTH_ERROR: Groq returned {resp.status_code} — check GROQ_API_KEY "
+                f"AUTH_ERROR: OpenRouter returned {resp.status_code} — check OPENROUTER_API_KEY "
                 f"({resp.text[:120]})"
             )
-        if resp.status_code == 413:
-            # Payload too large for this model's TPM window — skip it permanently
-            # for this session; the prompt size won't shrink on retry.
-            raise RuntimeError(f"MODEL_TOO_SMALL:{model}: {resp.text[:160]}")
         if resp.status_code == 400:
             try:
                 err = resp.json().get("error", {}) or {}
             except ValueError:
                 err = {}
-            code    = str(err.get("code") or "")
             err_msg = str(err.get("message") or "").lower()
-            if code == "model_decommissioned" or "decommissioned" in err_msg:
-                # Model permanently removed by Groq — never try it again
-                raise RuntimeError(f"MODEL_DEAD:{model}: decommissioned")
-            if code == "json_validate_failed" or "max_tokens" in err_msg or "max completion tokens" in err_msg:
+            if "max_tokens" in err_msg or "max completion tokens" in err_msg:
                 raise RuntimeError(f"TRUNCATED:{model}: {resp.text[:160]}")
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
         if resp.status_code == 404:
@@ -804,7 +968,7 @@ class AIAnalyst:
         content = None
         for i, max_tokens in enumerate(token_budgets):
             try:
-                _, content, finish_reason = self._post_groq_model(
+                _, content, finish_reason = self._post_or_model(
                     model, system_prompt, payload_text, max_tokens=max_tokens
                 )
             except RuntimeError as e:
@@ -823,102 +987,75 @@ class AIAnalyst:
 
         return content, False
 
-    def _call_groq_models(self, system_prompt, payload_text):
-        if not _get_groq_key():
+    def _call_openrouter(self, system_prompt, payload_text):
+        """Single-model caller for OpenRouter with daily budget enforcement."""
+        if not _get_or_key():
             raise RuntimeError(
-                "GROQ_API_KEY not set — restart server.py and enter your key. "
-                "Get a free key at https://console.groq.com/keys"
+                "OPENROUTER_API_KEY not set — add it to your .env file. "
+                "Free key at https://openrouter.ai/keys"
             )
-        candidates = [self._or_model] if self._or_model else []
-        candidates += [m for m in GROQ_MODELS if m and m not in candidates]
 
-        now_t  = time.time()
-        # Filter out permanently dead models and currently rate-limited ones
-        models  = [m for m in candidates
-                   if m not in _DEAD_MODELS and now_t >= self._model_rl_until.get(m, 0)]
-        skipped_rl   = [m for m in candidates if m not in _DEAD_MODELS and m not in models]
-        skipped_dead = [m for m in candidates if m in _DEAD_MODELS]
-        if skipped_rl:
-            log.info("Skipping rate-limited Groq models: %s", skipped_rl)
-        if skipped_dead:
-            log.info("Skipping decommissioned Groq models: %s", skipped_dead)
-        if not models:
-            raise RuntimeError("RATE_LIMIT:all Groq models are individually rate-limited")
+        model = OR_MODEL
 
-        last_exc = None
-        for model in models:
-            try:
-                self._record_evt(stage="model_attempt", provider="groq", model=model)
-                content, ok = self._post_with_truncation_retry(model, system_prompt, payload_text)
-                if not ok:
-                    self._model_rl_until[model] = time.time() + self._JSON_FAIL_COOLDOWN
-                    if self._or_model == model:
-                        self._or_model = None
-                    self._record_evt(
-                        stage="model_rate_limited", provider="groq", model=model,
-                        message="Unparseable JSON after retry — trying next model",
-                        cooldown_s=self._JSON_FAIL_COOLDOWN,
-                    )
-                    last_exc = RuntimeError(f"invalid JSON from {model}")
-                    continue
-                self._or_model = model
-                self._model_rl_until.pop(model, None)
-                self._active_models.add(model)
-                self._record_evt(stage="model_success", provider="groq", model=model)
-                return model, content
-            except RuntimeError as e:
-                msg = str(e)
-                last_exc = e
-                if msg.startswith("AUTH_ERROR"):
-                    raise
-                if msg.startswith("RATE_LIMIT:"):
-                    parts = msg.split(":", 2)
-                    retry_after = 0.0
-                    if len(parts) >= 2:
-                        try:
-                            retry_after = float(parts[1])
-                        except ValueError:
-                            pass
-                    cooldown = retry_after if retry_after > 0 else self._MODEL_RL_SECONDS
-                    self._model_rl_until[model] = time.time() + cooldown
-                    if self._or_model == model:
-                        self._or_model = None
-                    self._record_evt(
-                        stage="model_rate_limited", provider="groq", model=model,
-                        cooldown_s=cooldown, from_retry_after=bool(retry_after > 0),
-                    )
-                    continue
-                if msg.startswith("MODEL_DEAD:"):
-                    # Permanently decommissioned — remove from all future attempts
-                    _DEAD_MODELS.add(model)
-                    if self._or_model == model:
-                        self._or_model = None
-                    log.warning("[groq] %s is decommissioned — removed from rotation", model)
-                    self._record_evt(stage="model_dead", provider="groq", model=model)
-                    continue
-                if msg.startswith("MODEL_TOO_SMALL:"):
-                    # Payload exceeds this model's token limit — skip for 24h
-                    # (prompt size doesn't change between retries)
-                    self._model_rl_until[model] = time.time() + 86400
-                    if self._or_model == model:
-                        self._or_model = None
-                    log.warning("[groq] %s returned 413 (payload too large) — skipping for 24h", model)
-                    self._record_evt(stage="model_too_small", provider="groq", model=model)
-                    continue
-                if msg.startswith("MODEL_ERROR:"):
-                    self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
-                    if self._or_model == model:
-                        self._or_model = None
-                    continue
+        # ── Daily budget check ──────────────────────────────────────────────
+        ok, secs_until_reset = _or_check_budget()
+        if not ok:
+            raise RuntimeError(
+                f"RATE_LIMIT:{secs_until_reset}:{model}: "
+                f"OpenRouter daily limit of {_OR_DAILY_LIMIT} requests reached. "
+                f"Resets in {int(secs_until_reset // 3600)}h {int((secs_until_reset % 3600) // 60)}m."
+            )
+
+        # ── Per-model cooldown (e.g. after 429) ─────────────────────────────
+        now_t = time.time()
+        if now_t < self._model_rl_until.get(model, 0):
+            wait_s = self._model_rl_until[model] - now_t
+            raise RuntimeError(
+                f"RATE_LIMIT:{wait_s}:{model}: model is in cooldown "
+                f"({int(wait_s // 60)}m {int(wait_s % 60)}s remaining)"
+            )
+
+        try:
+            self._record_evt(stage="model_attempt", provider="openrouter", model=model)
+            content, ok = self._post_with_truncation_retry(model, system_prompt, payload_text)
+            if not ok:
+                self._model_rl_until[model] = time.time() + self._JSON_FAIL_COOLDOWN
+                self._record_evt(
+                    stage="model_json_fail", provider="openrouter", model=model,
+                    message="Unparseable JSON after retry",
+                    cooldown_s=self._JSON_FAIL_COOLDOWN,
+                )
+                raise RuntimeError(f"invalid JSON from {model}")
+            self._model_rl_until.pop(model, None)
+            self._active_models.add(model)
+            self._record_evt(stage="model_success", provider="openrouter", model=model)
+            return model, content
+        except RuntimeError as e:
+            msg = str(e)
+            if msg.startswith("AUTH_ERROR"):
                 raise
-            except requests.RequestException as e:
-                last_exc = e
-                continue
-
-        raise RuntimeError(f"RATE_LIMIT:all Groq models failed: {last_exc}")
+            if msg.startswith("RATE_LIMIT:"):
+                parts = msg.split(":", 2)
+                retry_after = 0.0
+                if len(parts) >= 2:
+                    try:
+                        retry_after = float(parts[1])
+                    except ValueError:
+                        pass
+                cooldown = retry_after if retry_after > 0 else self._MODEL_RL_SECONDS
+                self._model_rl_until[model] = time.time() + cooldown
+                self._record_evt(
+                    stage="model_rate_limited", provider="openrouter", model=model,
+                    cooldown_s=cooldown, from_retry_after=bool(retry_after > 0),
+                )
+                raise
+            if msg.startswith("MODEL_ERROR:"):
+                self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                raise
+            raise
 
     def _call_ai(self, payload_text):
-        return self._call_groq_models(SYSTEM_PROMPT, payload_text)
+        return self._call_openrouter(SYSTEM_PROMPT, payload_text)
 
     # -----------------------------------------------------------------------
     # Public API
