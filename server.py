@@ -500,22 +500,6 @@ async def _run_scan_once() -> None:
         _broadcast_all({"type": "scanner_progress", "progress": "Scan failed — see server logs"})
 
 
-async def _scanner_loop() -> None:
-    """Periodically run the coin scanner and broadcast results to all clients."""
-    # Small delay so the rest of the server is warm before the first expensive scan
-    await asyncio.sleep(10)
-    while True:
-        try:
-            if getattr(config, "SCANNER_AUTO_SCAN", True) and scanner.should_scan():
-                await _run_scan_once()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            traceback.print_exc()
-        # Re-check every 60 s; actual scan only fires when should_scan() is True
-        await asyncio.sleep(60)
-
-
 # ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
@@ -534,13 +518,10 @@ async def on_startup(app: web.Application) -> None:
         print("[binance] API key configured")
     else:
         print("[binance] No API key — public endpoints only")
-    app["scanner_task"] = asyncio.create_task(_scanner_loop())
-    cmc_note = "with CMC" if getattr(config, "CMC_API_KEY", "") else "Binance-only"
-    print(f"[scanner] Coin scanner enabled ({cmc_note}) — first scan in ~10 s")
 
 
 async def on_cleanup(app: web.Application) -> None:
-    for key in ("ai_task", "status_task", "scanner_task"):
+    for key in ("ai_task", "status_task"):
         task = app.get(key)
         if task:
             task.cancel()

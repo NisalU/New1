@@ -95,8 +95,7 @@ LIMIT_SIGNALS_ENABLED = True
 
 # ---- Coin Scanner ----
 CMC_API_KEY            = os.environ.get("CMC_API_KEY", "")   # optional
-SCANNER_AUTO_SCAN      = True        # run automatically on startup + every N hours
-SCANNER_INTERVAL_HOURS = 2           # hours between automatic re-scans
+SCANNER_INTERVAL_HOURS = 2           # hours between manual re-scans (for should_scan tracking)
 SCANNER_MIN_VOL_M      = 50          # minimum 24h volume in millions USD
 SCANNER_BLACKLIST      = ["BTCUSDT", "ETHUSDT"]   # always-excluded symbols
 SCANNER_SHOW_TOP       = 10          # rows shown in the dashboard table
