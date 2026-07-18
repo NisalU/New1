@@ -36,30 +36,18 @@ log = logging.getLogger("ai_analyst")
 # ---------------------------------------------------------------------------
 GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Valid Groq model identifiers (verified against Groq's live model list).
-# Order matters — first available non-rate-limited model wins.
-#
-# Removed:
-#   llama-3.1-70b-versatile  — HTTP 400 model_decommissioned (Groq removed it)
-#
-# Free-tier TPM limits to keep in mind:
-#   llama-3.3-70b-versatile  — 6000 TPM / 100k TPD
-#   llama-3.3-70b-specdec    — same family, separate quota bucket
-#   mixtral-8x7b-32768       — 5000 TPM (32k context, good for large payloads)
-#   gemma2-9b-it             — 15000 TPM (higher minute quota, useful fallback)
-#   llama-3.1-8b-instant     — 6000 TPM, kept last (payload often hits 413)
+# Groq model fallback list — first available non-rate-limited model wins.
+# llama-3.1-70b-versatile permanently removed (HTTP 400 model_decommissioned).
 GROQ_MODELS = [
     m for m in [
-        os.environ.get("GROQ_MODEL", ""),   # override via env var
+        os.environ.get("GROQ_MODEL", ""),   # pin via env var
         "llama-3.3-70b-versatile",
-        "llama-3.3-70b-specdec",
         "mixtral-8x7b-32768",
-        "gemma2-9b-it",
         "llama-3.1-8b-instant",
     ] if m
 ]
 
-# Models confirmed dead (decommissioned by Groq) — never attempted again.
+# Models confirmed dead (decommissioned by Groq) — never attempted again this session.
 # Populated at runtime when HTTP 400 model_decommissioned is received.
 _DEAD_MODELS: set = set()
 
