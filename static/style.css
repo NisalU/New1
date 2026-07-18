@@ -485,6 +485,7 @@ select:hover { border-color: #38bdf8; }
 .scanner-mode-badge.cmc { background: rgba(250,204,21,.1); color: #fbbf24;
   border-color: rgba(250,204,21,.25); }
 
+.scanner-card .card-head h2 { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .scanner-head-right { display: flex; align-items: center; gap: .7rem; flex-shrink: 0; }
 
 .scanner-last-scan { font-size: .7rem; color: var(--muted); white-space: nowrap; }
