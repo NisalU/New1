@@ -26,10 +26,9 @@ engine     = None  # type: ignore[assignment]
 manager    = None  # type: ignore[assignment]
 scanner    = None  # type: ignore[assignment]
 
-# ── Priority queue for immediate AI analysis on symbol switch ────────────────
-# Symbols added here jump to the front of _ai_loop's queue.
-# _priority_event wakes the sleeping loop instantly (no 60 s wait).
-_priority_symbols: set = set()
+# ── Single active symbol — only one coin is analysed at a time ───────────────
+# Changed by POST /api/symbol (REST) or the WS "subscribe" message.
+_active_symbol: str = ""          # set to DEFAULT_SYMBOL in _load_app_modules
 _priority_event: "asyncio.Event | None" = None
 
 
@@ -94,6 +93,9 @@ def _load_app_modules() -> None:
     manager    = _manager
     scanner    = _scanner
 
+    global _active_symbol
+    _active_symbol = _config.DEFAULT_SYMBOL
+
 
 # ---------------------------------------------------------------------------
 # Static / index
@@ -109,7 +111,7 @@ async def index(_request: web.Request) -> web.StreamResponse:
 
 async def api_config(_request: web.Request) -> web.Response:
     return web.json_response({
-        "symbols":          config.SYMBOLS,
+        "active_symbol":    _active_symbol or config.DEFAULT_SYMBOL,
         "intervals":        config.INTERVALS,
         "default_symbol":   config.DEFAULT_SYMBOL,
         "default_interval": config.DEFAULT_INTERVAL,
@@ -119,10 +121,47 @@ async def api_config(_request: web.Request) -> web.Response:
     })
 
 
+def _valid_symbol(sym: str) -> bool:
+    """Accept any USDT-margined futures pair (e.g. BTCUSDT, SOLUSDT)."""
+    return bool(sym) and sym.upper().endswith("USDT") and len(sym) >= 5
+
+
+async def api_get_symbol(_request: web.Request) -> web.Response:
+    """Return the single coin currently being watched by the AI loop."""
+    return web.json_response({"symbol": _active_symbol})
+
+
+async def api_set_symbol(request: web.Request) -> web.Response:
+    """Switch the single coin the AI loop watches.
+    Body: { "symbol": "SOLUSDT" }
+    The old symbol's AI cache is cleared so the new coin gets a fresh read.
+    """
+    global _active_symbol
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    sym = (body.get("symbol") or "").upper().strip()
+    if not _valid_symbol(sym):
+        return web.json_response({"error": "symbol must end with USDT (e.g. SOLUSDT)"}, status=400)
+    old = _active_symbol
+    _active_symbol = sym
+    if old != sym:
+        # Clear stale cache so the loop does a fresh call immediately
+        with ai_analyst._lock:
+            ai_analyst._cache.pop(sym, None)
+        if _priority_event:
+            _priority_event.set()
+        # Tell all connected clients the active symbol changed
+        for c in manager.clients:
+            c.send({"type": "active_symbol", "symbol": sym})
+    return web.json_response({"symbol": sym, "ok": True})
+
+
 async def api_state(request: web.Request) -> web.Response:
     symbol   = request.query.get("symbol",   config.DEFAULT_SYMBOL)
     interval = request.query.get("interval", config.DEFAULT_INTERVAL)
-    if symbol not in config.SYMBOLS or interval not in config.INTERVALS:
+    if not _valid_symbol(symbol) or interval not in config.INTERVALS:
         return web.json_response({"error": "invalid symbol or interval"}, status=400)
     try:
         data = await asyncio.to_thread(engine.get_state, symbol, interval)
@@ -137,7 +176,7 @@ async def api_signals(_request: web.Request) -> web.Response:
 
 async def api_ai(request: web.Request) -> web.Response:
     symbol = request.query.get("symbol", config.DEFAULT_SYMBOL)
-    if symbol not in config.SYMBOLS:
+    if not _valid_symbol(symbol):
         return web.json_response({"error": "invalid symbol"}, status=400)
     if not ai_analyst.enabled:
         return web.json_response({"error": "GROQ_API_KEY not set"}, status=503)
@@ -232,7 +271,7 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
         # ── Hello burst ──────────────────────────────────────────────────
         client.send({
             "type":               "config",
-            "symbols":            config.SYMBOLS,
+            "active_symbol":      _active_symbol or config.DEFAULT_SYMBOL,
             "intervals":          config.INTERVALS,
             "default_symbol":     config.DEFAULT_SYMBOL,
             "default_interval":   config.DEFAULT_INTERVAL,
@@ -283,24 +322,27 @@ async def ws_endpoint(request: web.Request) -> web.WebSocketResponse:
             if kind == "subscribe":
                 sym = msg.get("symbol", config.DEFAULT_SYMBOL)
                 ivl = msg.get("interval", config.DEFAULT_INTERVAL)
-                if sym in config.SYMBOLS and ivl in config.INTERVALS:
-                    old_sym = client.symbol
-                    # retarget() updates client.symbol/interval AND fires
-                    # _resub so the upstream loop resubscribes to the new
-                    # symbol's aggTrade + kline_ Binance streams immediately.
+                if _valid_symbol(sym) and ivl in config.INTERVALS:
+                    global _active_symbol
+                    old_sym = _active_symbol
+                    # Switch the single watched coin
+                    _active_symbol = sym
                     manager.retarget(client, sym, ivl)
                     asyncio.create_task(push_snapshot(sym, ivl))
-                    # Push cached AI immediately so dashboard updates without wait
+                    if old_sym != sym:
+                        # Clear stale cache, wake the AI loop immediately
+                        with ai_analyst._lock:
+                            ai_analyst._cache.pop(sym, None)
+                        if _priority_event:
+                            _priority_event.set()
+                        # Tell all clients the active coin changed
+                        for c in manager.clients:
+                            c.send({"type": "active_symbol", "symbol": sym})
                     if ai_analyst.enabled:
                         cached_ai = ai_analyst.get_cached(sym)
                         if cached_ai:
                             client.send({"type": "ai", "data": cached_ai})
                         else:
-                            # No cached result — queue for immediate analysis and
-                            # tell the client to show the "analyzing" animation now.
-                            _priority_symbols.add(sym)
-                            if _priority_event:
-                                _priority_event.set()
                             client.send({"type": "ai_analyzing", "symbol": sym})
                         _push_countdown(client, sym)
                         client.send({"type": "engine_status",    "data": ai_analyst.get_status()})
@@ -370,36 +412,18 @@ async def _status_loop() -> None:
 
 
 async def _ai_loop() -> None:
-    """Run AI analyst for each active symbol, every AI_REFRESH_SECONDS.
+    """Run AI analyst for the single active symbol, every AI_REFRESH_SECONDS.
 
-    - Skips analysis when an active signal is live (price hasn't hit stop/target).
-    - Broadcasts countdown so the dashboard can show a live timer.
-    - Uses exponential backoff when all models are rate-limited.
-    - Priority queue: symbols added to _priority_symbols jump to the front
-      and wake the loop immediately via _priority_event (no 60-s wait).
+    Only one coin is analysed at a time.  Switch coins via POST /api/symbol
+    or the WS "subscribe" message — the loop wakes immediately and runs a
+    fresh call for the new coin.
     """
-    _symbol_queue: list[str] = []
     _consecutive_failures = 0
     _BACKOFF = [300, 600, 1200, 1800]
 
     while True:
         try:
-            active = list({c.symbol for c in manager.clients} | {config.DEFAULT_SYMBOL})
-            _symbol_queue[:] = [s for s in _symbol_queue if s in active]
-            for s in active:
-                if s not in _symbol_queue:
-                    _symbol_queue.append(s)
-
-            # Promote any priority symbols (new symbol subscriptions) to front
-            for ps in list(_priority_symbols & set(active)):
-                _priority_symbols.discard(ps)
-                if ps in _symbol_queue:
-                    _symbol_queue.remove(ps)
-                _symbol_queue.insert(0, ps)
-
-            symbol = _symbol_queue.pop(0) if _symbol_queue else config.DEFAULT_SYMBOL
-            if symbol not in _symbol_queue:
-                _symbol_queue.append(symbol)
+            symbol = _active_symbol or config.DEFAULT_SYMBOL
 
             # Set next-analysis timestamp and broadcast countdown BEFORE running
             next_ts = int(time.time() + config.AI_REFRESH_SECONDS)
@@ -543,6 +567,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/pipeline-events",    api_pipeline_events)
     app.router.add_get("/api/signal-status",      api_signal_status)
     app.router.add_get("/api/pending-limits",     api_pending_limits)
+    app.router.add_get("/api/symbol",             api_get_symbol)
+    app.router.add_post("/api/symbol",            api_set_symbol)
     app.router.add_get("/api/scanner",            api_scanner)
     app.router.add_post("/api/scanner/trigger",   api_scanner_trigger)
     app.router.add_get("/ws",                     ws_endpoint)
