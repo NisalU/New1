@@ -36,18 +36,32 @@ log = logging.getLogger("ai_analyst")
 # ---------------------------------------------------------------------------
 GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Valid Groq model identifiers (checked against Groq's model list).
-# The "openai/gpt-oss-*" names are OpenRouter IDs and are rejected by the
-# Groq API with HTTP 404 — they were removed here to stop wasting retries.
+# Valid Groq model identifiers (verified against Groq's live model list).
+# Order matters — first available non-rate-limited model wins.
+#
+# Removed:
+#   llama-3.1-70b-versatile  — HTTP 400 model_decommissioned (Groq removed it)
+#
+# Free-tier TPM limits to keep in mind:
+#   llama-3.3-70b-versatile  — 6000 TPM / 100k TPD
+#   llama-3.3-70b-specdec    — same family, separate quota bucket
+#   mixtral-8x7b-32768       — 5000 TPM (32k context, good for large payloads)
+#   gemma2-9b-it             — 15000 TPM (higher minute quota, useful fallback)
+#   llama-3.1-8b-instant     — 6000 TPM, kept last (payload often hits 413)
 GROQ_MODELS = [
     m for m in [
-        os.environ.get("GROQ_MODEL", ""),   # override via env
+        os.environ.get("GROQ_MODEL", ""),   # override via env var
         "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
-        "llama-3.1-8b-instant",
+        "llama-3.3-70b-specdec",
         "mixtral-8x7b-32768",
+        "gemma2-9b-it",
+        "llama-3.1-8b-instant",
     ] if m
 ]
+
+# Models confirmed dead (decommissioned by Groq) — never attempted again.
+# Populated at runtime when HTTP 400 model_decommissioned is received.
+_DEAD_MODELS: set = set()
 
 PROMPT_CANDLE_COUNT  = getattr(config, "AI_PROMPT_CANDLES",     50)
 PROMPT_HTF_CANDLES   = getattr(config, "AI_PROMPT_HTF_CANDLES", 10)
@@ -776,6 +790,10 @@ class AIAnalyst:
                 f"AUTH_ERROR: Groq returned {resp.status_code} — check GROQ_API_KEY "
                 f"({resp.text[:120]})"
             )
+        if resp.status_code == 413:
+            # Payload too large for this model's TPM window — skip it permanently
+            # for this session; the prompt size won't shrink on retry.
+            raise RuntimeError(f"MODEL_TOO_SMALL:{model}: {resp.text[:160]}")
         if resp.status_code == 400:
             try:
                 err = resp.json().get("error", {}) or {}
@@ -783,6 +801,9 @@ class AIAnalyst:
                 err = {}
             code    = str(err.get("code") or "")
             err_msg = str(err.get("message") or "").lower()
+            if code == "model_decommissioned" or "decommissioned" in err_msg:
+                # Model permanently removed by Groq — never try it again
+                raise RuntimeError(f"MODEL_DEAD:{model}: decommissioned")
             if code == "json_validate_failed" or "max_tokens" in err_msg or "max completion tokens" in err_msg:
                 raise RuntimeError(f"TRUNCATED:{model}: {resp.text[:160]}")
             raise RuntimeError(f"MODEL_ERROR:{model}: {resp.status_code} {resp.text[:80]}")
@@ -824,10 +845,15 @@ class AIAnalyst:
         candidates += [m for m in GROQ_MODELS if m and m not in candidates]
 
         now_t  = time.time()
-        models  = [m for m in candidates if now_t >= self._model_rl_until.get(m, 0)]
-        skipped = [m for m in candidates if m not in models]
-        if skipped:
-            log.info("Skipping rate-limited Groq models: %s", skipped)
+        # Filter out permanently dead models and currently rate-limited ones
+        models  = [m for m in candidates
+                   if m not in _DEAD_MODELS and now_t >= self._model_rl_until.get(m, 0)]
+        skipped_rl   = [m for m in candidates if m not in _DEAD_MODELS and m not in models]
+        skipped_dead = [m for m in candidates if m in _DEAD_MODELS]
+        if skipped_rl:
+            log.info("Skipping rate-limited Groq models: %s", skipped_rl)
+        if skipped_dead:
+            log.info("Skipping decommissioned Groq models: %s", skipped_dead)
         if not models:
             raise RuntimeError("RATE_LIMIT:all Groq models are individually rate-limited")
 
@@ -873,6 +899,23 @@ class AIAnalyst:
                         stage="model_rate_limited", provider="groq", model=model,
                         cooldown_s=cooldown, from_retry_after=bool(retry_after > 0),
                     )
+                    continue
+                if msg.startswith("MODEL_DEAD:"):
+                    # Permanently decommissioned — remove from all future attempts
+                    _DEAD_MODELS.add(model)
+                    if self._or_model == model:
+                        self._or_model = None
+                    log.warning("[groq] %s is decommissioned — removed from rotation", model)
+                    self._record_evt(stage="model_dead", provider="groq", model=model)
+                    continue
+                if msg.startswith("MODEL_TOO_SMALL:"):
+                    # Payload exceeds this model's token limit — skip for 24h
+                    # (prompt size doesn't change between retries)
+                    self._model_rl_until[model] = time.time() + 86400
+                    if self._or_model == model:
+                        self._or_model = None
+                    log.warning("[groq] %s returned 413 (payload too large) — skipping for 24h", model)
+                    self._record_evt(stage="model_too_small", provider="groq", model=model)
                     continue
                 if msg.startswith("MODEL_ERROR:"):
                     self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
