@@ -1656,7 +1656,7 @@
     subscribe();
   }
 
-  symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); });
+  symbolEl.addEventListener("change",  function () { localStorage.setItem(LS_SYM, symbolEl.value);   reset(); syncScannerActiveRow(); });
   intervalEl.addEventListener("change", function () { localStorage.setItem(LS_INT, intervalEl.value); reset(); });
 
   /* ── Coin Scanner ─────────────────────────────────────────────────────────── */
@@ -1725,10 +1725,14 @@
     }
 
     var html = "";
+    var activeSym = symbolEl ? symbolEl.value : "";
     rows.forEach(function (r, i) {
       var rank  = i + 1;
       var best  = rank === 1;
-      var rowCls = best ? "scanner-row-best" : "";
+      var active = r.symbol === activeSym;
+      var rowCls = "scanner-row-clickable"
+        + (best   ? " scanner-row-best"   : "")
+        + (active ? " scanner-row-active" : "");
 
       // 7d% colour
       var chg7dCls = r.chg7d > 0.5 ? "scanner-chg-pos" : r.chg7d < -0.5 ? "scanner-chg-neg" : "scanner-chg-neu";
@@ -1743,9 +1747,9 @@
       // Trend penalty indicator
       var trendNote = r.trend_m < 1.0 ? " ⚡" : "";
 
-      html += '<tr class="' + rowCls + '">'
+      html += '<tr class="' + rowCls + '" data-symbol="' + r.symbol + '" title="Switch dashboard to ' + r.symbol + '">'
         + '<td class="scanner-rank">' + rank + '</td>'
-        + '<td class="scanner-sym">' + r.symbol + (best ? '<span class="scanner-best-star">★</span>' : '') + '</td>'
+        + '<td class="scanner-sym">' + r.symbol + (best ? '<span class="scanner-best-star">★</span>' : '') + (active ? '<span class="scanner-active-dot">●</span>' : '') + '</td>'
         + '<td class="scanner-atr">' + r.atr_pct.toFixed(2) + '%</td>'
         + '<td class="scanner-vol">' + r.vol_m.toFixed(0) + 'M</td>'
         + '<td class="' + chg7dCls + '">' + chg7dTxt + '</td>'
@@ -1756,6 +1760,61 @@
     });
     tbody.innerHTML = html;
   }
+
+  // Highlight whichever scanner row matches the currently selected symbol
+  function syncScannerActiveRow() {
+    var tbody = document.getElementById("scanner-tbody");
+    if (!tbody) return;
+    var activeSym = symbolEl ? symbolEl.value : "";
+    tbody.querySelectorAll("tr[data-symbol]").forEach(function (tr) {
+      var sym = tr.getAttribute("data-symbol");
+      var isActive = sym === activeSym;
+      tr.classList.toggle("scanner-row-active", isActive);
+      // dot indicator inside symbol cell
+      var symCell = tr.querySelector(".scanner-sym");
+      if (symCell) {
+        var dot = symCell.querySelector(".scanner-active-dot");
+        if (isActive && !dot) {
+          var s = document.createElement("span");
+          s.className = "scanner-active-dot"; s.textContent = "●";
+          symCell.appendChild(s);
+        } else if (!isActive && dot) {
+          dot.remove();
+        }
+      }
+    });
+  }
+
+  // Switch dashboard to a coin from the scanner
+  function switchToScannerSymbol(sym) {
+    if (!sym || !symbolEl) return;
+    if (sym === symbolEl.value) return;
+    // Add option dynamically if the symbol isn't already in the dropdown
+    var found = false;
+    for (var i = 0; i < symbolEl.options.length; i++) {
+      if (symbolEl.options[i].value === sym) { found = true; break; }
+    }
+    if (!found) {
+      var opt = document.createElement("option");
+      opt.value = opt.textContent = sym;
+      symbolEl.appendChild(opt);
+    }
+    symbolEl.value = sym;
+    localStorage.setItem(LS_SYM, sym);
+    reset();
+    syncScannerActiveRow();
+  }
+
+  // Row click → switch dashboard
+  (function () {
+    var tbody = document.getElementById("scanner-tbody");
+    if (!tbody) return;
+    tbody.addEventListener("click", function (e) {
+      var tr = e.target.closest("tr[data-symbol]");
+      if (!tr) return;
+      switchToScannerSymbol(tr.getAttribute("data-symbol"));
+    });
+  })();
 
   // Scan button — trigger manual rescan
   (function () {

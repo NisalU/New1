@@ -547,12 +547,21 @@ select:hover { border-color: #38bdf8; }
 .scanner-table tbody td:nth-child(1),
 .scanner-table tbody td:nth-child(2) { text-align: left; }
 
-.scanner-table tbody tr:hover td { background: rgba(255,255,255,.03); }
+/* Clickable rows */
+.scanner-row-clickable { cursor: pointer; transition: background .12s; }
+.scanner-row-clickable:hover td { background: rgba(56,189,248,.07) !important; }
+
+/* Active (currently viewed) coin */
+.scanner-row-active td { background: rgba(56,189,248,.13) !important; }
+.scanner-row-active td:nth-child(2) { color: #38bdf8; }
+.scanner-active-dot { color: #38bdf8; font-size: .55rem; margin-left: .3rem; vertical-align: middle; }
 
 /* Best coin row */
 .scanner-row-best td { background: rgba(56,189,248,.06) !important; }
 .scanner-row-best td:nth-child(2) { color: #38bdf8; font-weight: 700; }
 .scanner-row-best .scanner-score { color: #38bdf8; font-weight: 700; }
+/* Active overrides best */
+.scanner-row-active.scanner-row-best td { background: rgba(56,189,248,.18) !important; }
 
 /* Cell colours */
 .scanner-rank   { color: var(--muted); }
