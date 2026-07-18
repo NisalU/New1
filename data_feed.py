@@ -314,7 +314,7 @@ def place_order(symbol, side, order_type, quantity, price=None, time_in_force="G
         params["timeInForce"] = time_in_force
     signed = _signed_params(params)
     r = _session().post(
-        (config.SPOT_ENDPOINTS[0]) + "/api/v3/order",
+        (_spot_base or config.SPOT_ENDPOINTS[0]) + "/api/v3/order",
         params=signed, timeout=10,
     )
     if r.status_code != 200:

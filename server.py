@@ -14,6 +14,7 @@ import socket
 import sys
 import traceback
 from pathlib import Path
+import time
 
 from aiohttp import WSMsgType, web
 
@@ -401,7 +402,7 @@ async def _ai_loop() -> None:
                 _symbol_queue.append(symbol)
 
             # Set next-analysis timestamp and broadcast countdown BEFORE running
-            import time as _t; next_ts = int(_t.time() + config.AI_REFRESH_SECONDS)
+            next_ts = int(time.time() + config.AI_REFRESH_SECONDS)
             ai_analyst.set_next_analysis_ts(symbol, next_ts)
             countdown_payload = {
                 "type":       "ai_countdown",
@@ -422,7 +423,7 @@ async def _ai_loop() -> None:
                     f"Backing off {backoff // 60} min."
                 )
                 # Update next-ts for extended backoff
-                backoff_next = int(__import__("time").time() + backoff)
+                backoff_next = int(time.time() + backoff)
                 ai_analyst.set_next_analysis_ts(symbol, backoff_next)
                 backoff_payload = {
                     "type":       "ai_countdown",
@@ -475,7 +476,6 @@ async def _ai_loop() -> None:
             await asyncio.sleep(config.AI_REFRESH_SECONDS)
 
 
-import time as _time_mod  # noqa: E402 (used in _ai_loop)
 
 
 def _broadcast_all(msg: dict) -> None:

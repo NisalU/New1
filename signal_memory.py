@@ -51,13 +51,15 @@ def record(entry):
     try:
         with _lock:
             conn = _conn()
-            conn.execute(
-                f"INSERT INTO signal_history ({', '.join(_COLUMNS)}) "
-                f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
-                tuple(entry.get(c) for c in _COLUMNS),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute(
+                    f"INSERT INTO signal_history ({', '.join(_COLUMNS)}) "
+                    f"VALUES ({', '.join('?' for _ in _COLUMNS)})",
+                    tuple(entry.get(c) for c in _COLUMNS),
+                )
+                conn.commit()
+            finally:
+                conn.close()
     except Exception:  # noqa: BLE001
         pass
 
@@ -65,26 +67,29 @@ def record(entry):
 def recent_similar(symbol, direction=None, limit=3):
     """Most recent entries for this symbol (optionally filtered by
     direction), most recent first. Returns [] on any error."""
+    rows = []
     try:
         with _lock:
             conn = _conn()
-            cur = conn.cursor()
-            if direction:
-                cur.execute(
-                    "SELECT timestamp, direction, setup_type, entry, stop, target, "
-                    "market_condition, trade_quality, result FROM signal_history "
-                    "WHERE symbol=? AND direction=? ORDER BY timestamp DESC LIMIT ?",
-                    (symbol, direction, limit),
-                )
-            else:
-                cur.execute(
-                    "SELECT timestamp, direction, setup_type, entry, stop, target, "
-                    "market_condition, trade_quality, result FROM signal_history "
-                    "WHERE symbol=? ORDER BY timestamp DESC LIMIT ?",
-                    (symbol, limit),
-                )
-            rows = cur.fetchall()
-            conn.close()
+            try:
+                cur = conn.cursor()
+                if direction:
+                    cur.execute(
+                        "SELECT timestamp, direction, setup_type, entry, stop, target, "
+                        "market_condition, trade_quality, result FROM signal_history "
+                        "WHERE symbol=? AND direction=? ORDER BY timestamp DESC LIMIT ?",
+                        (symbol, direction, limit),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT timestamp, direction, setup_type, entry, stop, target, "
+                        "market_condition, trade_quality, result FROM signal_history "
+                        "WHERE symbol=? ORDER BY timestamp DESC LIMIT ?",
+                        (symbol, limit),
+                    )
+                rows = cur.fetchall()
+            finally:
+                conn.close()
     except Exception:  # noqa: BLE001
         return []
     cols = ("timestamp", "direction", "setup_type", "entry", "stop", "target",

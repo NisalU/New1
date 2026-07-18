@@ -27,7 +27,7 @@ def _location_quality(overlays, price, a):
         ob["bottom"] - a * 0.3 <= price <= ob["top"] + a * 0.3
         for ob in overlays.get("order_blocks") or []
     )
-    near_fvg = any(f["bottom"] <= price <= f["top"] for f in overlays.get("fvgs") or [])
+    near_fvg = any(f["bottom"] <= price <= f["top"] for f in overlays.get("fvg") or [])
     near_sr = any(
         abs(lv["price"] - price) < a * 1.2
         for lv in (overlays.get("support") or []) + (overlays.get("resistance") or [])
