@@ -5,10 +5,9 @@ Run on any local Linux/Mac machine:
     python server.py
 Then open http://<local-ip>:8000 from any device on the same network.
 
-Keys can be supplied three ways (highest priority first):
-  1. Environment variables: GROQ_API_KEY, BINANCE_API_KEY, BINANCE_API_SECRET
+Keys are loaded from (highest priority first):
+  1. Environment variables already set in the shell
   2. A .env file in the project directory
-  3. Interactive prompt at startup (only when running in a TTY)
 """
 import asyncio
 import contextlib
@@ -21,12 +20,33 @@ from pathlib import Path
 import time
 
 # ── .env support ──────────────────────────────────────────────────────────────
-# Load before anything else so env vars are available to all modules.
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # python-dotenv is optional; fall back to plain env vars
+# Try python-dotenv first; if not installed, parse the .env file manually.
+# Either way, existing shell env vars always take priority (no override).
+def _load_env_file() -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)
+        return
+    except ImportError:
+        pass
+
+    # Built-in fallback: parse .env ourselves — no third-party package needed.
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    with open(env_path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            # Never overwrite a value already set in the environment
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+_load_env_file()
 
 from aiohttp import WSMsgType, web
 
