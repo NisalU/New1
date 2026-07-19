@@ -14,6 +14,7 @@ import traceback
 
 import config
 from engine import engine
+from footprint import footprint as fp_agg
 
 try:
     import websockets
@@ -190,6 +191,7 @@ class StreamManager:
                     "time": msg["T"],
                 }
                 self._dirty_ticks.add(symbol)
+                fp_agg.on_trade(symbol, float(msg["p"]), float(msg["q"]), bool(msg["m"]))
             elif etype == "kline":
                 k = msg["k"]
                 symbol, interval = msg["s"], k["i"]
@@ -218,6 +220,7 @@ class StreamManager:
                 # waiting up to REFRESH_SECONDS — score/overlays update live.
                 if out["closed"] and (symbol, interval) in self.active_markets():
                     asyncio.create_task(self._refresh_market(symbol, interval))
+                    fp_agg.on_candle_close(symbol, k["t"] // 1000, float(k["h"]), float(k["l"]))
 
     # ---------------- tick fanout (coalesced) ----------------
     async def _tick_flusher(self):
