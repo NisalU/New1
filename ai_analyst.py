@@ -48,12 +48,13 @@ OR_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Override primary via OPENROUTER_MODEL env var.
 _OR_MODEL_PRIMARY = os.environ.get("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")
 OR_MODELS: list[str] = [
-  _OR_MODEL_PRIMARY,
-  "meta-llama/llama-3.3-70b-instruct:free",
-  "deepseek/deepseek-r1-0528:free",
-  "qwen/qwen3-8b:free",
-  "microsoft/phi-4:free",
-  "google/gemma-3-27b-it:free",
+  _OR_MODEL_PRIMARY,                              # google/gemma-4-31b-it:free (default)
+  "meta-llama/llama-3.3-70b-instruct:free",      # Meta Llama 3.3 70B
+  "nvidia/nemotron-3-ultra-550b-a55b:free",       # NVIDIA Nemotron 550B — best reasoning
+  "nousresearch/hermes-3-llama-3.1-405b:free",   # Hermes 3 405B — strong JSON output
+  "qwen/qwen3-coder:free",                        # Qwen3 Coder 480B — structured output
+  "openai/gpt-oss-20b:free",                     # OpenAI OSS 20B
+  "nvidia/nemotron-3-super-120b-a12b:free",       # NVIDIA Nemotron 120B — fast fallback
 ]
 
 # ---------------------------------------------------------------------------
