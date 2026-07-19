@@ -982,72 +982,85 @@ class AIAnalyst:
         return content, False
 
     def _call_openrouter(self, system_prompt, payload_text):
-        """Single-model caller for OpenRouter with daily budget enforcement."""
-        if not _get_or_key():
-            raise RuntimeError(
-                "OPENROUTER_API_KEY not set — add it to your .env file. "
-                "Free key at https://openrouter.ai/keys"
-            )
+          """Rotating-model caller — iterates OR_MODELS until one succeeds."""
+          if not _get_or_key():
+              raise RuntimeError(
+                  "OPENROUTER_API_KEY not set — add it to your .env file. "
+                  "Free key at https://openrouter.ai/keys"
+              )
 
-        model = OR_MODEL
+          # ── Daily budget check ──────────────────────────────────────────────
+          ok, secs_until_reset = _or_check_budget()
+          if not ok:
+              raise RuntimeError(
+                  f"RATE_LIMIT:{secs_until_reset}:budget: "
+                  f"OpenRouter daily limit of {_OR_DAILY_LIMIT} requests reached. "
+                  f"Resets in {int(secs_until_reset // 3600)}h {int((secs_until_reset % 3600) // 60)}m."
+              )
 
-        # ── Daily budget check ──────────────────────────────────────────────
-        ok, secs_until_reset = _or_check_budget()
-        if not ok:
-            raise RuntimeError(
-                f"RATE_LIMIT:{secs_until_reset}:{model}: "
-                f"OpenRouter daily limit of {_OR_DAILY_LIMIT} requests reached. "
-                f"Resets in {int(secs_until_reset // 3600)}h {int((secs_until_reset % 3600) // 60)}m."
-            )
+          now_t = time.time()
+          last_err = None
 
-        # ── Per-model cooldown (e.g. after 429) ─────────────────────────────
-        now_t = time.time()
-        if now_t < self._model_rl_until.get(model, 0):
-            wait_s = self._model_rl_until[model] - now_t
-            raise RuntimeError(
-                f"RATE_LIMIT:{wait_s}:{model}: model is in cooldown "
-                f"({int(wait_s // 60)}m {int(wait_s % 60)}s remaining)"
-            )
+          for model in OR_MODELS:
+              # Skip models still in cooldown
+              if now_t < self._model_rl_until.get(model, 0):
+                  wait_s = self._model_rl_until[model] - now_t
+                  log.debug("[openrouter] skipping %s — cooldown %.0fs", model, wait_s)
+                  continue
 
-        try:
-            self._record_evt(stage="model_attempt", provider="openrouter", model=model)
-            content, ok = self._post_with_truncation_retry(model, system_prompt, payload_text)
-            if not ok:
-                self._model_rl_until[model] = time.time() + self._JSON_FAIL_COOLDOWN
-                self._record_evt(
-                    stage="model_json_fail", provider="openrouter", model=model,
-                    message="Unparseable JSON after retry",
-                    cooldown_s=self._JSON_FAIL_COOLDOWN,
-                )
-                raise RuntimeError(f"invalid JSON from {model}")
-            self._model_rl_until.pop(model, None)
-            self._active_models.add(model)
-            self._record_evt(stage="model_success", provider="openrouter", model=model)
-            return model, content
-        except RuntimeError as e:
-            msg = str(e)
-            if msg.startswith("AUTH_ERROR"):
-                raise
-            if msg.startswith("RATE_LIMIT:"):
-                parts = msg.split(":", 2)
-                retry_after = 0.0
-                if len(parts) >= 2:
-                    try:
-                        retry_after = float(parts[1])
-                    except ValueError:
-                        pass
-                cooldown = retry_after if retry_after > 0 else self._MODEL_RL_SECONDS
-                self._model_rl_until[model] = time.time() + cooldown
-                self._record_evt(
-                    stage="model_rate_limited", provider="openrouter", model=model,
-                    cooldown_s=cooldown, from_retry_after=bool(retry_after > 0),
-                )
-                raise
-            if msg.startswith("MODEL_ERROR:"):
-                self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
-                raise
-            raise
+              try:
+                  self._record_evt(stage="model_attempt", provider="openrouter", model=model)
+                  response, parsed_ok = self._post_with_truncation_retry(model, system_prompt, payload_text)
+                  if not parsed_ok:
+                      self._model_rl_until[model] = time.time() + self._JSON_FAIL_COOLDOWN
+                      self._record_evt(
+                          stage="model_json_fail", provider="openrouter", model=model,
+                          message="Unparseable JSON after retry",
+                          cooldown_s=self._JSON_FAIL_COOLDOWN,
+                      )
+                      last_err = RuntimeError(f"invalid JSON from {model}")
+                      continue
+                  self._model_rl_until.pop(model, None)
+                  self._active_models.add(model)
+                  self._record_evt(stage="model_success", provider="openrouter", model=model)
+                  return model, response
 
+              except RuntimeError as e:
+                  msg = str(e)
+                  if msg.startswith("AUTH_ERROR"):
+                      raise
+                  if msg.startswith("RATE_LIMIT:"):
+                      parts = msg.split(":", 2)
+                      retry_after = 0.0
+                      if len(parts) >= 2:
+                          try:
+                              retry_after = float(parts[1])
+                          except ValueError:
+                              pass
+                      cooldown = retry_after if retry_after > 0 else self._MODEL_RL_SECONDS
+                      self._model_rl_until[model] = time.time() + cooldown
+                      self._record_evt(
+                          stage="model_rate_limited", provider="openrouter", model=model,
+                          cooldown_s=cooldown, from_retry_after=bool(retry_after > 0),
+                      )
+                      log.warning("[openrouter] %s rate-limited (%.0fs cooldown) — trying next model", model, cooldown)
+                      last_err = e
+                      continue
+                  if msg.startswith("MODEL_ERROR:"):
+                      self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                      last_err = e
+                      continue
+                  raise
+
+          # All models exhausted
+          wait_s = min(
+              (v - now_t) for v in self._model_rl_until.values() if v > now_t
+          ) if self._model_rl_until else self._MODEL_RL_SECONDS
+          raise RuntimeError(
+              f"RATE_LIMIT:{wait_s}:all: All OpenRouter models rate-limited. "
+              f"Last error: {last_err}"
+          )
+    
     def _call_ai(self, payload_text):
         return self._call_openrouter(SYSTEM_PROMPT, payload_text)
 
