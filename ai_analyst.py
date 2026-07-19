@@ -43,7 +43,7 @@ OR_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Free-tier model with 256k context window.
 # Override via OPENROUTER_MODEL env var if needed.
-OR_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b")
+OR_MODEL = os.environ.get("OPENROUTER_MODEL", "gpt-oss-120b:free")
 
 # ---------------------------------------------------------------------------
 # Daily request budget (OpenRouter free tier: 50 requests / UTC day)
