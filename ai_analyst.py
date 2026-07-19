@@ -1131,7 +1131,7 @@ class AIAnalyst:
         model, raw = self._call_ai(user_text)
         latency_ms = int((time.time() - t0) * 1000)
 
-        provider = "groq"
+        provider = "openrouter"
         self._record_evt(
             run_id=run_id, stage="ai_call", status="done", symbol=symbol,
             model=model, provider=provider, latency_ms=latency_ms,
@@ -1344,7 +1344,7 @@ class AIAnalyst:
             self.last_error = msg
             is_rate_limit = msg.startswith("RATE_LIMIT:")
             if is_rate_limit:
-                log.warning("All Groq models rate-limited for %s — returning cached", symbol)
+                log.warning("All OpenRouter models rate-limited for %s — returning cached", symbol)
             else:
                 traceback.print_exc()
             cached = self.get_cached(symbol)
