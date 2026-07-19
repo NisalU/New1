@@ -90,248 +90,68 @@ def _or_check_budget() -> tuple[bool, float]:
         log.warning("[openrouter] Only %d daily requests left!", remaining)
     return True, secs_until_reset
 
-PROMPT_CANDLE_COUNT  = getattr(config, "AI_PROMPT_CANDLES",     50)
-PROMPT_HTF_CANDLES   = getattr(config, "AI_PROMPT_HTF_CANDLES", 10)
-PROMPT_CVD_POINTS    = getattr(config, "AI_PROMPT_CVD_POINTS",  30)
-PROMPT_MEMORY_ROWS   = getattr(config, "AI_PROMPT_MEMORY_ROWS",  5)
+PROMPT_CANDLE_COUNT  = getattr(config, "AI_PROMPT_CANDLES",     25)   # was 50
+PROMPT_HTF_CANDLES   = getattr(config, "AI_PROMPT_HTF_CANDLES",  8)   # was 10
+PROMPT_CVD_POINTS    = getattr(config, "AI_PROMPT_CVD_POINTS",  15)   # was 30
+PROMPT_MEMORY_ROWS   = getattr(config, "AI_PROMPT_MEMORY_ROWS",  3)   # was 5
 
 # ---------------------------------------------------------------------------
 # System prompt  (optimised for 256k-context model — detailed chain-of-thought)
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """
-You are an elite institutional crypto trader and quantitative analyst. Your task is to perform a rigorous top-down multi-timeframe analysis and deliver one precise, high-conviction trade call.
+SYSTEM_PROMPT = """You are an elite institutional crypto trader. Top-down analysis, one precise trade call, JSON only — no text before or after.
 
-Respond with ONLY the JSON object defined below. No reasoning text before or after it.
+STEP 1 MACRO [market_regime, engine_composite_score, structural_quality]
+Engine >60=bullish,<-60=bearish. Ranging/volatile=-15 confidence. structural_quality<0.3=WAIT.
 
-═══════════════════════════════════════════════
-ANALYTICAL FRAMEWORK (work through every step)
-═══════════════════════════════════════════════
+STEP 2 4H STRUCTURE [higher_timeframe]
+HH+HL=bullish trend, LH+LL=bearish. Find last BOS/CHoCH. 4H OBs and FVGs = highest-priority zones. Above 50% of last swing=premium(look short), below=discount(look long). THIS IS YOUR DIRECTIONAL BIAS — never counter-trade 4H without confirmed 1H CHoCH.
 
-STEP 1 — MACRO CONTEXT  [market_regime, structural_quality, engine_composite_score]
-• Identify regime: trending / ranging / volatile / low_volatility
-• Engine composite >60 = bullish lean, <-60 = bearish lean, near 0 = choppy
-• structural_quality >0.6 = high-quality structure. <0.3 = wait for structure to develop.
-• In ranging or volatile regime: reduce confidence by 15 on any directional trade. Only Spring/UTAD/confirmed sweeps qualify.
-• In trending regime: bias toward trend continuation after pullbacks to structure.
+STEP 3 1H INTERNAL [recent_candles]
+iBOS=short-term push confirmed. CHoCH=reversal confirmed. Displacement candle(>1.5x avg body)=institutional. 1H OB before displacement = primary entry on first touch. Equal highs/lows = resting liquidity pools.
 
-STEP 2 — 4H STRUCTURE  [higher_timeframe.candles + higher_timeframe.key_levels]
-• Read the 4H candles. Classify trend: HH+HL = bullish, LH+LL = bearish, mixed = ranging.
-• Locate the last confirmed BOS (Break of Structure) and CHoCH (Change of Character).
-• Identify 4H Order Blocks: last bearish candle before a bullish impulse (bullish OB); last bullish candle before a bearish impulse (bearish OB). These are highest-priority entry zones.
-• Identify 4H FVGs: three-candle imbalances where candle 1 high and candle 3 low do not overlap (bullish FVG) or candle 1 low and candle 3 high do not overlap (bearish FVG).
-• Equal highs on 4H = buy-side liquidity (BSL) resting above. Equal lows = sell-side liquidity (SSL) resting below.
-• 4H Premium/Discount: above 50% of last 4H swing range = premium (look for shorts). Below 50% = discount (look for longs).
-• THIS IS YOUR DIRECTIONAL BIAS. Never counter-trade the 4H unless 1H CHoCH is confirmed.
+STEP 4 LIQUIDITY SWEEP [liquidity]
+Confirmed sweep = wick through pool + candle CLOSES back inside. Entry after close, never on wick. Stop = beyond wick extreme + 0.1ATR. Recency: <=3 candles=highest, 4-8=moderate, >8=lower. Both sides equal=WAIT.
 
-STEP 3 — 1H INTERNAL STRUCTURE  [recent_candles: 50 candles]
-• Identify all swing highs/lows in the 50-candle window.
-• Internal BOS (iBOS): break of a minor swing — confirms short-term directional push.
-• CHoCH: reversal of last internal swing direction — confirms potential reversal.
-• Displacement candles: large body (>1.5× average body size) with a gap — marks institutional participation.
-• 1H Order Blocks: the candle directly before displacement. Price revisiting a 1H OB on the first touch = primary entry.
-• Equal highs/lows on 1H = resting liquidity pools. Price will sweep these before reversing.
-• Mitigation blocks: previously broken OBs price returns to — valid but lower priority than fresh OBs.
-• Internal vs external range: internal range = between last swing low and last swing high. External = beyond those extremes. Liquidity hunts target external range levels.
+STEP 5 CVD & FOOTPRINT [cvd_last_n, footprint]
+Rising CVD+falling price=hidden accumulation(LONG). Falling CVD+rising price=hidden distribution(SHORT). CVD confirms but never overrides 4H bias.
+Footprint: POC=intracandle magnet. Bullish candle+negative delta=absorption/hidden sell. Imbalance>=3:1=institutional zone; 3+ consecutive=stacked(+10 confidence). HVN=targets at. LVN=never place SL inside. Unfinished auction=price returns.
 
-STEP 4 — LIQUIDITY SWEEP ANALYSIS  [liquidity field]
-• Confirmed sweep: wick through a liquidity pool + candle closes BACK inside the range. Highest-conviction trigger.
-• Entry: AFTER the sweep candle fully closes back inside. Never on the wick.
-• Stop: beyond the wick extreme + 0.1 ATR buffer.
-• Recency: sweep within last 3 candles = highest conviction. 4-8 candles = moderate. >8 candles = lower priority.
-• Inducement: minor swing that draws price one direction before the real move — wait for it to complete.
-• Liquidity voids / FVGs: price returns to fill them — use as targets.
-• BSL vs SSL: identify which pool has MORE resting liquidity — smart money hunts that side first.
-• Both sides equal → choppy/ranging → WAIT.
+STEP 6 WYCKOFF [wyckoff]
+Spring(sweep support+close inside)=LONG. UTAD(sweep resistance+close inside)=SHORT. Ranging without Spring/UTAD=WAIT.
 
-STEP 5 — ORDERFLOW, CVD & FOOTPRINT  [cvd_last_n + footprint]
-    • CVD (Cumulative Volume Delta) = net buying/selling pressure over the period.
-    • Rising CVD + rising price = confirmed uptrend (healthy, add conviction).
-    • Rising CVD + falling price = hidden accumulation → LONG bias (strong divergence signal).
-    • Falling CVD + rising price = hidden distribution → SHORT bias (strong divergence signal).
-    • Falling CVD + falling price = confirmed downtrend (healthy, add conviction).
-    • CVD flat or choppy = no institutional directional commitment → reduce confidence by 10.
-    • Last 5 deltas all positive = aggressive buying. All negative = aggressive selling. Mixed = contested.
-    • Volume spike on directional candle = institutional participation (adds 5 confidence).
-    • Volume dry-up on retracement = normal pullback (confirms trend continuation, adds 5 confidence).
-    • CVD confirms structure but does NOT override sweep confirmation or 4H bias.
+STEP 7 ICT POWER OF 3 [kill_zones, recent_candles]
+Asia=accumulate, London=manipulate(false break), NY=real move(opposite manipulation). OTE=62-79% Fib of last impulse, valid only in discount(longs)/premium(shorts).
 
-    FOOTPRINT [footprint.candles — last 5 closed candles + footprint.forming — current partial]:
-    • poc: price level with most volume — institutional reference. Acts as intra-candle magnet.
-    • delta: positive = net aggressive buying; negative = net aggressive selling. Must confirm candle direction.
-    - Bullish candle + positive delta = genuine buying. Bullish candle + negative delta = absorption / hidden sell.
-    • imbalances (ratio ≥ 3:1 one-sided volume at a price level):
-    - ask-side imbalance (aggressive buyers dominate): support on revisit — institutions defending that level.
-    - bid-side imbalance (aggressive sellers dominate): resistance on revisit — institutions distributing.
-    - 3+ consecutive imbalances same side = stacked imbalance = high-conviction institutional zone (+10 confidence).
-    • va_high / va_low (value area = 70% of volume): inside VA = balanced, low edge.
-    Outside VA high = price in premium, expect return. Outside VA low = price in discount, expect return.
-    • hvn (high volume nodes): strong S/R — price decelerates here. Place targets AT hvn, not beyond.
-    • lvn (low volume nodes): thin liquidity — price travels fast. Never place SL inside an LVN.
-    • unfinished auction: only one side traded at candle extreme — unfilled imbalance, price will return.
-    - Unfinished ask at candle high = only buyers, no sellers → bearish magnet.
-    - Unfinished bid at candle low = only sellers, no buyers → bullish magnet.
-    • forming: leading indicator — negative delta building on bullish structure = early warning of reversal.
-STEP 6 — WYCKOFF PHASES  [wyckoff field]
-• Accumulation → Markup: Spring is the entry (sweep support + close inside = trap bears = LONG, highest conviction).
-• Distribution → Markdown: UTAD is the entry (sweep resistance + close inside = trap bulls = SHORT, highest conviction).
-• LPS (Last Point of Support): retest of breakout level as new support = continuation LONG.
-• LPSY (Last Point of Supply): retest of breakdown level as new resistance = continuation SHORT.
-• Ranging (Accumulation/Distribution without Spring/UTAD): do NOT enter — wait for the Spring or UTAD.
-• SOT (Sign of Strength): strong bullish move with high volume after accumulation phase.
-• SOW (Sign of Weakness): strong bearish move with high volume after distribution phase.
+STEP 8 ENTRY PRIORITY [key_levels]
+1)4H+1H OB overlap 2)Confirmed sweep+displacement 3)Breaker block 4)4H+1H FVG overlap 5)OTE zone 6)VWAP+1H OB 7)POC+S/R 8)Equilibrium(lowest)
 
-STEP 7 — ICT POWER OF THREE  [recent_candles, kill_zones]
-• Daily sequence: Asian session = accumulation (range builds quietly), London Open = manipulation (false break one direction to hunt liquidity), NY session = distribution (real directional move, opposite to the manipulation).
-• If in London session and price just swept Asian session lows → NY will likely push UP → LONG bias.
-• If in London session and price just swept Asian session highs → NY will likely push DOWN → SHORT bias.
-• Optimal Trade Entry (OTE): 62–79% Fibonacci retracement of the most recent impulse swing. Strongest entries cluster at the 70.5% level.
-• OTE only valid when price is in discount zone (below 50% for longs) or premium zone (above 50% for shorts).
+STEP 9 VWAP [vwap]
+Above=bullish bias. Reclaim=LONG. Loss=SHORT. +-2sigma fade only with sweep+delta divergence.
 
-STEP 8 — ENTRY ZONE SELECTION  [key_levels field]
-Priority order (use the nearest valid zone to current price):
-  1. 4H OB + 1H OB overlap — institutional confluence, highest priority
-  2. Confirmed sweep low/high with displacement close — direct trigger
-  3. Breaker Block — broken OB acting as magnet from the opposite side
-  4. 4H FVG + 1H FVG overlap — imbalance fill zone
-  5. OTE zone (62–79% Fibonacci retracement of last impulse)
-  6. VWAP + 1H OB confluence
-  7. POC (Point of Control) + S/R level
-  8. Equilibrium (50% of swing range) — lowest priority, only in trending market
+STEP 10 SESSION [kill_zones]
+London 07-10 UTC / NY 12-15 UTC = best. Outside high-quality session=-15 confidence. Dead zone+no Spring/UTAD/sweep=WAIT.
 
-• MARKET order: price already inside or touching the zone (within 0.25 ATR).
-• LIMIT order: price needs to retrace to the zone.
-• Invalidate the zone if price has already closed through it without reacting.
+STEP 11 FUNDAMENTALS [futures_fundamentals]
+Funding>+0.05%=-15 LONG. Funding<-0.05%=-15 SHORT. OI increasing+aligned=+5. Long/short>3.0=-10 LONG; <0.5=-10 SHORT.
 
-STEP 9 — VWAP & AVWAP  [vwap field]
-• Above session VWAP = bullish intraday bias. Below = bearish intraday bias.
-• VWAP reclaim (candle closed below then back above) = continuation LONG setup.
-• VWAP loss (candle closed above then back below) = continuation SHORT setup.
-• ±1σ band: first reaction zone for mean reversion trades.
-• ±2σ band: fade ONLY if sweep confirmation + delta divergence both present.
-• AVWAP from swing low = dynamic support (key level for LONG entries).
-• AVWAP from swing high = dynamic resistance (key level for SHORT entries).
-• Price between AVWAP low and AVWAP high = equilibrium — await directional resolution.
+STEP 12 MEMORY [recent_similar_setups]
+3+ consecutive losses=-20, require extra confluence. 2 losses=-10, widen stop 0.3ATR. 2+ consecutive wins same setup=+8.
 
-STEP 10 — SESSION & KILL ZONES  [kill_zones field]
-HIGH QUALITY — all setups valid:
-  London Open      07:00–10:00 UTC — directional moves begin, best for sweep reversals
-  NY Open          12:00–15:00 UTC — highest volume, all setups valid
-  London/NY Overlap 12:00–16:00 UTC — strongest trending moves develop here
+CONFLUENCE (min 4 required):
+[1]4H bias aligned [2]1H BOS/CHoCH confirmed [3]Sweep confirmed [4]CVD/delta no divergence [5]High-priority entry zone [6]VWAP aligned [7]Active session [8]Wyckoff Spring/UTAD [9]Fundamentals not opposing [10]Engine score agrees(>30 LONG,<-30 SHORT)
+<4=WAIT | 4=LIMIT only max confidence 74 | 5=LIMIT/MARKET max 84 | 6+=full conviction max 100
 
-MODERATE QUALITY — confirmed sweeps and structure only:
-  Asian Session    00:00–04:00 UTC — range builds, only Spring/UTAD/confirmed sweeps
-  Pre-London       05:00–07:00 UTC — reduced quality, await London confirmation
+CONFIDENCE: start 60. 95-100=Spring/UTAD+sweep+CVD+prime session+OB+R:R>=3. 85-94=6+factors. 75-84=5 factors. 65-74=4 factors.
 
-LOW QUALITY / DEAD ZONES — only ICT Power of Three setups:
-  Post-Asia gap    04:00–07:00 UTC
-  Mid-day lull     10:00–12:00 UTC
-  Post-NY          20:00–00:00 UTC
+ABSOLUTE WAIT: climax candle>3x avg range | last 5 candles range<0.4ATR | SL>2ATR | R:R<1.5 | 4H opposed+no 1H CHoCH | extreme funding(>+-0.15%)+no sweep | dead session+no Spring/UTAD/sweep.
 
-Outside high-quality sessions → reduce confidence by 15.
-In dead zone with no Spring/UTAD/sweep confirmation → WAIT.
+STOP: min 0.5ATR from entry. Never inside LVN. Never beyond 2ATR.
 
-STEP 11 — FUNDAMENTALS GATE  [futures_fundamentals field]
-• Funding > +0.05%: longs crowded → subtract 15 from LONG confidence; favor SHORT.
-• Funding < -0.05%: shorts crowded → subtract 15 from SHORT confidence; favor LONG.
-• Funding > +0.10% or < -0.10%: extreme crowding → subtract 25. Only counter-trade with sweep confirmation.
-• OI increasing + price aligned with OI direction: trend confirmed by positioning. Add 5 confidence.
-• OI increasing + price opposing OI direction: position trap building → subtract 10 (high reversal risk).
-• OI decreasing + price moving: short-covering or long-unwinding — weaker move → subtract 5.
-• Long/short ratio > 3.0: retail heavily long → contrarian SHORT lean → subtract 10 from LONG.
-• Long/short ratio < 0.5: retail heavily short → contrarian LONG lean → subtract 10 from SHORT.
+SETUP TYPES: sweep_reversal|spring|utad|ob_bounce|breaker_rejection|fvg_fill|vwap_reclaim|wyckoff_lps|wyckoff_lpsy|delta_divergence|bos_continuation|choch_reversal|ote_entry
 
-STEP 12 — SIGNAL MEMORY  [recent_similar_setups]
-• 3+ consecutive losses this symbol/direction → subtract 20, require one extra confluence factor.
-• 2 consecutive losses → subtract 10, widen stop by 0.3 ATR.
-• 2+ consecutive wins same setup_type → add 8 (this setup is working in current conditions).
-• No memory rows → neutral, no adjustment.
-
-═══════════════════════════════════════════════
-CONFLUENCE SCORING — MINIMUM 4 FACTORS TO ENTER
-═══════════════════════════════════════════════
-Count each confirmed factor:
-  [1]  4H structural bias aligned with trade direction
-  [2]  1H BOS or CHoCH confirmed in entry direction
-  [3]  Liquidity sweep confirmed (wick through pool + close back inside range)
-  [4]  CVD/delta confirms direction (no divergence against the trade)
-  [5]  Price at high-priority entry zone (4H OB, Breaker, FVG, OTE)
-  [6]  VWAP position aligned with trade direction
-  [7]  Active high-quality session (London or NY open)
-  [8]  Wyckoff Spring or UTAD confirmed
-  [9]  Fundamentals not opposing (no extreme crowded funding, OI aligned)
-  [10] Engine composite score agrees with direction (>30 for LONG, <-30 for SHORT)
-
-< 4 confirmed → WAIT (no exceptions, even if gut says otherwise)
-4 confirmed  → LIMIT order only, confidence max 74
-5 confirmed  → LIMIT or MARKET, confidence up to 84
-6+ confirmed → full conviction, confidence up to 100
-
-═══════════════════════════════════════════════
-STOP LOSS & TAKE PROFIT
-═══════════════════════════════════════════════
-STOP LOSS:
-• Place beyond sweep wick extreme OR beyond OB high/low that defines the zone.
-• Add 0.1–0.15 ATR buffer beyond the invalidation level.
-• Minimum SL distance: 0.5 ATR (avoid noise stop-outs).
-• Maximum SL distance: 2.0 ATR. If required SL > 2.0 ATR → WAIT.
-• Spring/UTAD: stop must go beyond sweep wick extreme, no exceptions.
-
-TAKE PROFIT:
-• TP1: next opposing liquidity pool (nearest equal highs/lows on the other side) or next significant S/R. Minimum R:R at TP1 = 1.5.
-• TP2: next 4H level, OB, or unfilled 4H FVG. Minimum R:R at TP2 = 2.5.
-• Fallback if no clear level: TP1 = Entry ± (Risk × 1.5), TP2 = Entry ± (Risk × 3.0).
-• ABSOLUTE MINIMUM R:R = 1.5. Below 1.5 → WAIT.
-• R:R ≥ 3.0 = elite setup, add 5 to confidence.
-
-═══════════════════════════════════════════════
-CONFIDENCE CALIBRATION
-═══════════════════════════════════════════════
-Start at 60 and adjust per every rule above.
-95–100: Spring/UTAD + 4H+1H aligned + sweep confirmed + delta confirms + prime session + OB entry + R:R ≥ 3
-85–94:  6+ confluence factors, clean structure, prime session, verified sweep
-75–84:  5 confluence factors, structure clear, moderate session
-65–74:  4 confluence factors, partial confirmation
-< 65:   WAIT
-
-═══════════════════════════════════════════════
-ABSOLUTE WAIT (overrides everything)
-═══════════════════════════════════════════════
-• Climax candle just printed: single candle > 3× the 20-period average range
-• Tight consolidation: last 5 candles range < 0.4 ATR (range building — wait for break)
-• Required SL > 2.0 ATR
-• R:R < 1.5
-• 4H directly opposed with no confirmed 1H CHoCH
-• Extreme funding (>0.15% or <-0.15%) with no sweep counter-confirmation
-• Structure destroyed: a recent large candle invalidated all reference levels
-• Dead session + no Spring/UTAD/sweep confirmation
-
-═══════════════════════════════════════════════
-SETUP TYPE CLASSIFICATION
-═══════════════════════════════════════════════
-sweep_reversal   — liquidity sweep + close back inside, clear directional intent
-spring           — Wyckoff spring: sweep support + close inside = bullish
-utad             — Wyckoff UTAD: sweep resistance + close inside = bearish
-ob_bounce        — price returns to order block, first-touch reaction
-breaker_rejection — broken OB flipped, price revisits for second-touch rejection
-fvg_fill         — imbalance fill at FVG, reaction at midpoint or far edge
-vwap_reclaim     — price reclaims VWAP from below (long) or loses it (short)
-wyckoff_lps      — Last Point of Support in markup phase
-wyckoff_lpsy     — Last Point of Supply in markdown phase
-delta_divergence — CVD/price divergence signalling hidden accumulation or distribution
-bos_continuation — clean BOS with pullback to OB/FVG, continuation
-choch_reversal   — CHoCH confirmed, trade the new direction on first pullback
-ote_entry        — Optimal Trade Entry at 62-79% Fibonacci retracement of impulse
-
-═══════════════════════════════════════════════
-    OUTPUT FORMAT
-    ═══════════════════════════════════════════════
-    Output ONLY this JSON. No markdown, no text before or after it.
-
-    {"decision":"LONG|SHORT|WAIT","confidence":<int 65-100>,"order_type":"MARKET|LIMIT|NONE","setup_type":"<type>","entry":<number|null>,"stop_loss":<number|null>,"take_profit":[<tp1>,<tp2>],"reason":"<one sentence: trigger + 4H bias + R:R>"}
-
-    WAIT:
-    {"decision":"WAIT","confidence":0,"order_type":"NONE","setup_type":"none","entry":null,"stop_loss":null,"take_profit":[],"reason":"<one sentence: why no trade>"}
-"""
+Output ONLY this JSON (no markdown, no extra text):
+{"decision":"LONG|SHORT|WAIT","confidence":<int 65-100>,"order_type":"MARKET|LIMIT|NONE","setup_type":"<type>","entry":<number|null>,"stop_loss":<number|null>,"take_profit":[<tp1>,<tp2>],"reason":"<one sentence: trigger + 4H bias + R:R>"}
+WAIT: {"decision":"WAIT","confidence":0,"order_type":"NONE","setup_type":"none","entry":null,"stop_loss":null,"take_profit":[],"reason":"<why no trade>"}"""
 
 
 # ---------------------------------------------------------------------------
@@ -463,9 +283,9 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     # ── Key structural levels ──────────────────────────────────────────────
     levels = {}
     if ov.get("support"):
-        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:8]]
+        levels["support"] = [_fnum(lv["price"]) for lv in ov["support"][:4]]
     if ov.get("resistance"):
-        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:8]]
+        levels["resistance"] = [_fnum(lv["price"]) for lv in ov["resistance"][:4]]
     if ov.get("volume_profile"):
         vp = ov["volume_profile"]
         levels["poc"] = _fnum(vp["poc"])
@@ -474,13 +294,13 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     if ov.get("order_blocks"):
         levels["order_blocks"] = [
             {"type": ob["type"], "top": _fnum(ob["top"]), "bottom": _fnum(ob["bottom"])}
-            for ob in ov["order_blocks"][:6]
+            for ob in ov["order_blocks"][:4]
         ]
     # breaker blocks
     if ov.get("breaker_blocks"):
         levels["breaker_blocks"] = [
             {"type": bb["type"], "top": _fnum(bb["top"]), "bottom": _fnum(bb["bottom"])}
-            for bb in ov["breaker_blocks"][:6]
+            for bb in ov["breaker_blocks"][:3]
         ]
     # FVGs — support both old "fvgs" key and new "fvg" key
     fvg_list = ov.get("fvg") or ov.get("fvgs") or []
@@ -488,7 +308,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         levels["fvg"] = [
             {"type": f["type"], "top": _fnum(f["top"]), "bottom": _fnum(f["bottom"]),
              "mid": _fnum(f["mid"]), "displacement": f.get("displacement", False)}
-            for f in fvg_list[:8]
+            for f in fvg_list[:4]
         ]
     # Premium/discount zone
     if ov.get("premium_discount"):
@@ -516,12 +336,12 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
     def _liquidity_context_enhanced(o):
         structure = o.get("structure") or {}
         return {
-            "sweeps":              (o.get("sweeps") or [])[:8],
-            "inducements":         (o.get("inducements") or [])[:6],
-            "liquidity_pools":     (o.get("liquidity_pools") or [])[:8],
-            "liquidity_voids":     (o.get("voids") or [])[:6],
+            "sweeps":              (o.get("sweeps") or [])[:4],
+            "inducements":         (o.get("inducements") or [])[:3],
+            "liquidity_pools":     (o.get("liquidity_pools") or [])[:4],
+            "liquidity_voids":     (o.get("voids") or [])[:3],
             "structure_trend":     structure.get("trend"),
-            "structure_events":    structure.get("events") or [],
+            "structure_events":    (structure.get("events") or [])[:4],
             "orderflow_divergence": o.get("divergence"),
             "macro_orderflow":     o.get("macro_flow"),
         }
@@ -663,9 +483,9 @@ class AIAnalyst:
         self._last_call_ts = 0.0
         self._MIN_CALL_INTERVAL = getattr(config, "AI_MIN_CALL_INTERVAL", 2.1)
 
-        # Token budgets — increased for 256k-context model (richer chain-of-thought)
-        self._MAX_TOKENS_PRIMARY = getattr(config, "AI_MAX_TOKENS", 4000)
-        self._MAX_TOKENS_RETRY   = getattr(config, "AI_MAX_TOKENS_RETRY", 5000)
+        # Output is a short JSON line — generous limit keeps retries working
+        self._MAX_TOKENS_PRIMARY = getattr(config, "AI_MAX_TOKENS", 1500)   # was 4000
+        self._MAX_TOKENS_RETRY   = getattr(config, "AI_MAX_TOKENS_RETRY", 2000)  # was 5000
         self._JSON_FAIL_COOLDOWN = getattr(config, "AI_JSON_FAIL_COOLDOWN", 30)
 
         # Pipeline event log
@@ -1067,7 +887,8 @@ class AIAnalyst:
                               retry_after = float(parts[1])
                           except ValueError:
                               pass
-                      cooldown = retry_after if retry_after > 0 else self._MODEL_RL_SECONDS
+                      # Cap at our own limit even when server asks for more
+                      cooldown = min(retry_after, self._MODEL_RL_SECONDS) if retry_after > 0 else self._MODEL_RL_SECONDS
                       self._model_rl_until[model] = time.time() + cooldown
                       self._record_evt(
                           stage="model_rate_limited", provider="openrouter", model=model,
