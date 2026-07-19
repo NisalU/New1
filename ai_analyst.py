@@ -54,7 +54,10 @@ OR_MODELS: list[str] = [
   "nousresearch/hermes-3-llama-3.1-405b:free",   # Hermes 3 405B — strong JSON output
   "qwen/qwen3-coder:free",                        # Qwen3 Coder 480B — structured output
   "openai/gpt-oss-20b:free",                     # OpenAI OSS 20B
-  "nvidia/nemotron-3-super-120b-a12b:free",       # NVIDIA Nemotron 120B — fast fallback
+  "nvidia/nemotron-3-super-120b-a12b:free",       # NVIDIA Nemotron 120B
+  "nvidia/nemotron-3-nano-30b-a3b:free",          # NVIDIA Nemotron Nano 30B
+  "tencent/hy3:free",                             # Tencent Hy3 — 262k ctx
+  "openrouter/free",                              # OpenRouter auto-router — picks any free model with capacity
 ]
 
 # ---------------------------------------------------------------------------
@@ -653,7 +656,7 @@ class AIAnalyst:
 
         # Per-model rate-limit tracking
         self._model_rl_until: dict = {}
-        self._MODEL_RL_SECONDS = getattr(config, "MODEL_RL_COOLDOWN", 60)
+        self._MODEL_RL_SECONDS = getattr(config, "MODEL_RL_COOLDOWN", 15)  # 429 retry window
 
         # Global throttle
         self._rate_lock = threading.Lock()
@@ -1074,7 +1077,9 @@ class AIAnalyst:
                       last_err = e
                       continue
                   if msg.startswith("MODEL_ERROR:"):
-                      self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                      # 404/unavailable — skip for the rest of the session (6 h)
+                      self._model_rl_until[model] = time.time() + 21600
+                      log.warning("[openrouter] %s unavailable (404) — skipping for 6h", model)
                       last_err = e
                       continue
                   raise
