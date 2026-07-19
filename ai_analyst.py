@@ -45,15 +45,15 @@ OR_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Free-tier model with 256k context window.
 # Override via OPENROUTER_MODEL env var if needed.
 # Ordered fallback list — first non-rate-limited model wins.
-    # Override primary via OPENROUTER_MODEL env var.
-    _OR_MODEL_PRIMARY = os.environ.get("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")
-    OR_MODELS: list[str] = [
-      _OR_MODEL_PRIMARY,
-      "meta-llama/llama-3.3-70b-instruct:free",
-      "qwen/qwen3-235b-a22b:free",
-      "mistralai/mistral-7b-instruct:free",
-      "tencent/hunyuan-a13b-instruct:free",
-    ]
+# Override primary via OPENROUTER_MODEL env var.
+_OR_MODEL_PRIMARY = os.environ.get("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")
+OR_MODELS: list[str] = [
+  _OR_MODEL_PRIMARY,
+  "meta-llama/llama-3.3-70b-instruct:free",
+  "qwen/qwen3-235b-a22b:free",
+  "mistralai/mistral-7b-instruct:free",
+  "tencent/hunyuan-a13b-instruct:free",
+]
 
 # ---------------------------------------------------------------------------
 # Daily request budget (OpenRouter free tier: 50 requests / UTC day)
