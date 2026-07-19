@@ -761,7 +761,7 @@ class AIAnalyst:
         except (TypeError, ValueError):
             return 0.0
 
-    def _post_or_model(self, model, system_prompt, payload_text, timeout=90, max_tokens=4000):
+    def _post_or_model(self, model, system_prompt, payload_text, timeout=30, max_tokens=4000):
         """POST one request to the OpenRouter chat completions endpoint."""
         key = _get_or_key()
         headers = {
@@ -868,12 +868,28 @@ class AIAnalyst:
                           message="Unparseable JSON after retry",
                           cooldown_s=self._JSON_FAIL_COOLDOWN,
                       )
+                      log.warning("[openrouter] %s returned bad JSON (%.0fs cooldown) — trying next model",
+                                  model, self._JSON_FAIL_COOLDOWN)
                       last_err = RuntimeError(f"invalid JSON from {model}")
                       continue
                   self._model_rl_until.pop(model, None)
                   self._active_models.add(model)
                   self._record_evt(stage="model_success", provider="openrouter", model=model)
                   return model, response
+
+              except requests.Timeout:
+                  # Slow model timed out — short cooldown, try next
+                  self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                  log.warning("[openrouter] %s timed out (%.0fs cooldown) — trying next model",
+                              model, self._MODEL_RL_SECONDS)
+                  last_err = RuntimeError(f"timeout: {model}")
+                  continue
+
+              except (requests.ConnectionError, requests.RequestException) as e:
+                  self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                  log.warning("[openrouter] %s connection error (%s) — trying next model", model, e)
+                  last_err = RuntimeError(f"connection error: {model}")
+                  continue
 
               except RuntimeError as e:
                   msg = str(e)
@@ -903,7 +919,11 @@ class AIAnalyst:
                       log.warning("[openrouter] %s unavailable (404) — skipping for 6h", model)
                       last_err = e
                       continue
-                  raise
+                  # HTTP_ERROR or other — short cooldown, try next model instead of crashing
+                  self._model_rl_until[model] = time.time() + self._MODEL_RL_SECONDS
+                  log.warning("[openrouter] %s error (%s) — trying next model", model, msg[:80])
+                  last_err = e
+                  continue
 
           # All models exhausted
           wait_s = min(
