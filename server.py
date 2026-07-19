@@ -536,6 +536,22 @@ async def _run_scan_once() -> None:
 async def on_startup(app: web.Application) -> None:
     global _priority_event
     _priority_event = asyncio.Event()
+
+    # Suppress harmless "Cannot write to closing transport" noise that fires
+    # whenever a WebSocket client disconnects mid-send.
+    _orig_handler = None
+    def _quiet_exception_handler(loop, context):
+        exc = context.get("exception")
+        if exc and type(exc).__name__ in ("ClientConnectionResetError", "ConnectionResetError"):
+            return  # client disconnected — expected, not an error
+        if _orig_handler:
+            _orig_handler(loop, context)
+        else:
+            loop.default_exception_handler(context)
+    _lp = asyncio.get_event_loop()
+    _orig_handler = _lp.get_exception_handler()
+    _lp.set_exception_handler(_quiet_exception_handler)
+
     manager.start()
     if ai_analyst.enabled:
         app["ai_task"]     = asyncio.create_task(_ai_loop())

@@ -62,7 +62,7 @@ AI_MIN_CALL_INTERVAL = 2.1
 AI_MIN_RISK_REWARD = 1.2
 AI_MAX_ENTRY_ATR_DISTANCE = 2.5
 
-MODEL_RL_COOLDOWN = 60
+MODEL_RL_COOLDOWN = 15   # seconds to wait before retrying a 429'd model
 
 # ---- AI critic — DISABLED ----
 AI_CRITIC_ENABLED = False
@@ -80,16 +80,16 @@ ACTIVE_SIGNAL_LOCK = True
 REGIME_COMPRESSION_TIGHT = 0.45
 REGIME_VOLATILITY_SPIKE = 1.8
 
-# Token budgets
-AI_MAX_TOKENS = 2500
-AI_MAX_TOKENS_RETRY = 3500
+# Token budgets — output is a ~150-token JSON line, no need for 4k
+AI_MAX_TOKENS       = 1500   # was 2500
+AI_MAX_TOKENS_RETRY = 2000   # was 3500
 AI_JSON_FAIL_COOLDOWN = 30
 
-# Prompt sizing
-AI_PROMPT_CANDLES     = 50   # 1H candles sent to AI  (was 8  — ~50h of price history)
-AI_PROMPT_HTF_CANDLES = 10   # 4H candles sent to AI  (new   — ~40h of HTF structure)
-AI_PROMPT_CVD_POINTS  = 30   # CVD data points        (was 15 — longer delta trend)
-AI_PROMPT_MEMORY_ROWS = 5    # past similar setups    (was 3)
+# Prompt sizing — reduced to cut input tokens ~50%
+AI_PROMPT_CANDLES     = 25   # was 50  (~25h of 1H price history, still plenty)
+AI_PROMPT_HTF_CANDLES =  8   # was 10
+AI_PROMPT_CVD_POINTS  = 15   # was 30
+AI_PROMPT_MEMORY_ROWS =  3   # was 5
 
 # ---- Limit signals ----
 LIMIT_SIGNALS_ENABLED = True
