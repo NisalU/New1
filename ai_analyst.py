@@ -32,6 +32,7 @@ import market_regime
 import signal_memory
 import trade_quality
 from engine import engine
+from footprint import footprint as fp_agg
 from strategies.helpers import atr
 
 log = logging.getLogger("ai_analyst")
@@ -137,18 +138,34 @@ STEP 4 — LIQUIDITY SWEEP ANALYSIS  [liquidity field]
 • BSL vs SSL: identify which pool has MORE resting liquidity — smart money hunts that side first.
 • Both sides equal → choppy/ranging → WAIT.
 
-STEP 5 — ORDERFLOW & CVD  [cvd_last_n: 30 points]
-• CVD (Cumulative Volume Delta) = net buying/selling pressure over the period.
-• Rising CVD + rising price = confirmed uptrend (healthy, add conviction).
-• Rising CVD + falling price = hidden accumulation → LONG bias (strong divergence signal).
-• Falling CVD + rising price = hidden distribution → SHORT bias (strong divergence signal).
-• Falling CVD + falling price = confirmed downtrend (healthy, add conviction).
-• CVD flat or choppy = no institutional directional commitment → reduce confidence by 10.
-• Last 5 deltas all positive = aggressive buying. All negative = aggressive selling. Mixed = contested.
-• Volume spike on directional candle = institutional participation (adds 5 confidence).
-• Volume dry-up on retracement = normal pullback (confirms trend continuation, adds 5 confidence).
-• CVD confirms structure but does NOT override sweep confirmation or 4H bias.
+STEP 5 — ORDERFLOW, CVD & FOOTPRINT  [cvd_last_n + footprint]
+    • CVD (Cumulative Volume Delta) = net buying/selling pressure over the period.
+    • Rising CVD + rising price = confirmed uptrend (healthy, add conviction).
+    • Rising CVD + falling price = hidden accumulation → LONG bias (strong divergence signal).
+    • Falling CVD + rising price = hidden distribution → SHORT bias (strong divergence signal).
+    • Falling CVD + falling price = confirmed downtrend (healthy, add conviction).
+    • CVD flat or choppy = no institutional directional commitment → reduce confidence by 10.
+    • Last 5 deltas all positive = aggressive buying. All negative = aggressive selling. Mixed = contested.
+    • Volume spike on directional candle = institutional participation (adds 5 confidence).
+    • Volume dry-up on retracement = normal pullback (confirms trend continuation, adds 5 confidence).
+    • CVD confirms structure but does NOT override sweep confirmation or 4H bias.
 
+    FOOTPRINT [footprint.candles — last 5 closed candles + footprint.forming — current partial]:
+    • poc: price level with most volume — institutional reference. Acts as intra-candle magnet.
+    • delta: positive = net aggressive buying; negative = net aggressive selling. Must confirm candle direction.
+    - Bullish candle + positive delta = genuine buying. Bullish candle + negative delta = absorption / hidden sell.
+    • imbalances (ratio ≥ 3:1 one-sided volume at a price level):
+    - ask-side imbalance (aggressive buyers dominate): support on revisit — institutions defending that level.
+    - bid-side imbalance (aggressive sellers dominate): resistance on revisit — institutions distributing.
+    - 3+ consecutive imbalances same side = stacked imbalance = high-conviction institutional zone (+10 confidence).
+    • va_high / va_low (value area = 70% of volume): inside VA = balanced, low edge.
+    Outside VA high = price in premium, expect return. Outside VA low = price in discount, expect return.
+    • hvn (high volume nodes): strong S/R — price decelerates here. Place targets AT hvn, not beyond.
+    • lvn (low volume nodes): thin liquidity — price travels fast. Never place SL inside an LVN.
+    • unfinished auction: only one side traded at candle extreme — unfilled imbalance, price will return.
+    - Unfinished ask at candle high = only buyers, no sellers → bearish magnet.
+    - Unfinished bid at candle low = only sellers, no buyers → bullish magnet.
+    • forming: leading indicator — negative delta building on bullish structure = early warning of reversal.
 STEP 6 — WYCKOFF PHASES  [wyckoff field]
 • Accumulation → Markup: Spring is the entry (sweep support + close inside = trap bears = LONG, highest conviction).
 • Distribution → Markdown: UTAD is the entry (sweep resistance + close inside = trap bulls = SHORT, highest conviction).
@@ -506,6 +523,13 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
 
     fundamentals = ov.get("fundamentals")
 
+
+    # ── Footprint chart ───────────────────────────────────────────────────
+    fp_candles = fp_agg.get_summary(symbol, n=5)
+    fp_partial = fp_agg.get_partial(symbol)
+    footprint_ctx: dict = {"candles": fp_candles}
+    if fp_partial:
+        footprint_ctx["forming"] = fp_partial
     return {
         "symbol":                analysis["symbol"],
         "chart":                 config.AI_INTERVAL,
@@ -528,6 +552,7 @@ def _compact_market(analysis, symbol, regime, structural_quality, memory_rows):
         "recent_similar_setups": memory_rows[:PROMPT_MEMORY_ROWS],
         "risk_warnings":         _risk_warnings(analysis, regime, memory_rows),
         "recent_candles":        recent,
+        "footprint":             footprint_ctx,
     }
 
 
