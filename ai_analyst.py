@@ -50,9 +50,10 @@ _OR_MODEL_PRIMARY = os.environ.get("OPENROUTER_MODEL", "google/gemma-4-31b-it:fr
 OR_MODELS: list[str] = [
   _OR_MODEL_PRIMARY,
   "meta-llama/llama-3.3-70b-instruct:free",
-  "qwen/qwen3-235b-a22b:free",
-  "mistralai/mistral-7b-instruct:free",
-  "tencent/hunyuan-a13b-instruct:free",
+  "deepseek/deepseek-r1-0528:free",
+  "qwen/qwen3-8b:free",
+  "microsoft/phi-4:free",
+  "google/gemma-3-27b-it:free",
 ]
 
 # ---------------------------------------------------------------------------
@@ -880,7 +881,7 @@ class AIAnalyst:
             "online":              self.enabled,
             "version":             "v5.0",
             "provider":            "openrouter",
-            "model":               OR_MODEL,
+            "model":               cur_model,
             "daily_requests_used": _or_daily_count,
             "daily_requests_limit": _OR_DAILY_LIMIT,
             "active_models":       len(config.WEIGHTS),
